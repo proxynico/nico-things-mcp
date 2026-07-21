@@ -1,5 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createRuntime,
   createServer,
@@ -21,6 +25,34 @@ import {
   type MdProject,
   type MdTodo,
 } from "./markdown";
+
+const doctorTempDir = mkdtempSync(join(tmpdir(), "nico-things-mcp-doctor-"));
+const doctorDbPath = join(doctorTempDir, "healthy.sqlite");
+const partialDoctorDbPath = join(doctorTempDir, "partial.sqlite");
+
+beforeAll(() => {
+  const db = new Database(doctorDbPath, { create: true });
+  db.run(`create table TMTask (
+    uuid text, type integer, status integer, title text, notes text,
+    deadline integer, startDate integer, stopDate real, creationDate real,
+    todayIndex integer, "index" integer, userModificationDate real,
+    openUntrashedLeafActionsCount integer,
+    project text, area text, heading text, trashed integer, start integer
+  )`);
+  db.run(`create table TMArea (uuid text, title text, "index" integer)`);
+  db.run(`create table TMTag (uuid text, title text, "index" integer)`);
+  db.run(`create table TMTaskTag (tasks text, tags text)`);
+  db.run(`create table TMChecklistItem (task text, title text, status integer, "index" integer)`);
+  db.close(false);
+
+  const partialDb = new Database(partialDoctorDbPath, { create: true });
+  partialDb.run("create table TMTask (uuid text)");
+  partialDb.close(false);
+});
+
+afterAll(() => {
+  rmSync(doctorTempDir, { force: true, recursive: true });
+});
 
 type Call = {
   body: string;
@@ -547,6 +579,52 @@ describe("read", () => {
     expect(jxaCalls).toHaveLength(1);
   });
 
+  test("falls back to JXA for every SQL-backed selector when SQLite fails", async () => {
+    const selectors = [
+      { list: "projects" },
+      { list: "areas" },
+      { list: "tags" },
+      { id: "todo-1" },
+      { project: "Launch" },
+      { area: "Work" },
+    ];
+
+    for (const selector of selectors) {
+      const { tools, jxaCalls } = createMockApp({
+        inspect: () => ({
+          appPath: "/Applications/Things3.app",
+          appPathExists: true,
+          fastReadsEnabled: true,
+          dbPath: "/missing/Things.sqlite",
+        }),
+        jxa: async () => "[]",
+      });
+
+      const result = await callTool(tools.read.handler, selector);
+
+      expect(isError(result)).toBeFalse();
+      expect(jxaCalls).toHaveLength(1);
+    }
+  });
+
+  test("keeps computed-list reads on JXA when auxiliary SQLite helpers fail", async () => {
+    const { tools, jxaCalls } = createMockApp({
+      fastListRead: async () => {
+        throw new Error("database is locked");
+      },
+      sortListItems: () => {
+        throw new Error("database is locked");
+      },
+      jxa: async () => '[{"id":"todo-1","kind":"todo","name":"Fallback"}]',
+    });
+
+    const result = await callTool(tools.read.handler, { list: "anytime" });
+
+    expect(isError(result)).toBeFalse();
+    expect(textOf(result)).toContain('"Fallback"');
+    expect(jxaCalls).toHaveLength(1);
+  });
+
   test("returns read errors from jxa", async () => {
     const { tools } = createMockApp({
       jxa: async () => {
@@ -561,15 +639,14 @@ describe("read", () => {
 });
 
 describe("doctor", () => {
-  test("reports a healthy runtime when access, token, and fast reads are available", async () => {
+  test("reports SQL reads, JXA reads, and JSON writes as independent capabilities", async () => {
     const { tools } = createMockApp({
       jxa: async () => '["Inbox","Today"]',
-      fastListRead: async () => "[]",
       inspect: () => ({
         appPath: "/Applications/Things3.app",
         appPathExists: true,
         fastReadsEnabled: true,
-        dbPath: "/tmp/main.sqlite",
+        dbPath: doctorDbPath,
       }),
     });
 
@@ -580,14 +657,14 @@ describe("doctor", () => {
     };
 
     expect(report.ok).toBeTrue();
-    expect(report.checks.app_path?.ok).toBeTrue();
-    expect(report.checks.auth_token?.ok).toBeTrue();
-    expect(report.checks.things_access?.ok).toBeTrue();
-    expect(report.checks.fast_reads?.ok).toBeTrue();
-    expect(report.checks.fast_reads?.available).toBeTrue();
+    expect(Object.keys(report.checks)).toEqual(["sql_read", "jxa_read", "json_writes"]);
+    expect(report.checks.sql_read?.ok).toBeTrue();
+    expect(report.checks.sql_read?.available).toBeTrue();
+    expect(report.checks.jxa_read?.ok).toBeTrue();
+    expect(report.checks.json_writes?.ok).toBeTrue();
   });
 
-  test("reports missing token and startup failures without crashing", async () => {
+  test("reports unhealthy when neither read path works", async () => {
     const { tools } = createMockApp({
       token: "",
       jxa: async () => {
@@ -608,14 +685,13 @@ describe("doctor", () => {
     };
 
     expect(report.ok).toBeFalse();
-    expect(report.checks.app_path?.ok).toBeFalse();
-    expect(report.checks.auth_token?.ok).toBeFalse();
-    expect(report.checks.things_access?.ok).toBeFalse();
-    expect(report.checks.things_access?.message).toBe("Things 3 startup check failed: Application can't be found.");
-    expect(report.checks.fast_reads?.ok).toBeTrue();
+    expect(report.checks.sql_read?.ok).toBeFalse();
+    expect(report.checks.jxa_read?.ok).toBeFalse();
+    expect(report.checks.jxa_read?.message).toBe("Things 3 startup check failed: Application can't be found.");
+    expect(report.checks.json_writes?.ok).toBeFalse();
   });
 
-  test("stays healthy overall when read access works but write auth is not configured", async () => {
+  test("stays healthy when only JXA reads work and JSON writes are not configured", async () => {
     const { tools } = createMockApp({
       token: "",
       jxa: async () => '["Inbox","Today"]',
@@ -634,21 +710,68 @@ describe("doctor", () => {
     };
 
     expect(report.ok).toBeTrue();
-    expect(report.checks.auth_token?.ok).toBeFalse();
-    expect(report.checks.things_access?.ok).toBeTrue();
+    expect(report.checks.sql_read?.ok).toBeFalse();
+    expect(report.checks.jxa_read?.ok).toBeTrue();
+    expect(report.checks.json_writes?.ok).toBeFalse();
   });
 
-  test("fails overall when configured fast reads are broken", async () => {
+  test("stays healthy when only SQL reads work", async () => {
     const { tools } = createMockApp({
-      jxa: async () => '["Inbox","Today"]',
-      fastListRead: async () => {
-        throw new Error("database is locked");
+      jxa: async () => {
+        throw new Error("automation unavailable");
       },
       inspect: () => ({
         appPath: "/Applications/Things3.app",
         appPathExists: true,
         fastReadsEnabled: true,
-        dbPath: "/tmp/main.sqlite",
+        dbPath: doctorDbPath,
+      }),
+    });
+
+    const result = await callTool(tools.doctor.handler, {});
+    const report = JSON.parse(textOf(result) ?? "{}") as {
+      ok: boolean;
+      checks: Record<string, { ok: boolean; message: string }>;
+    };
+
+    expect(report.ok).toBeTrue();
+    expect(report.checks.sql_read?.ok).toBeTrue();
+    expect(report.checks.jxa_read?.ok).toBeFalse();
+    expect(report.checks.json_writes?.ok).toBeTrue();
+  });
+
+  test("stays healthy through JXA when the configured SQLite path is broken", async () => {
+    const { tools } = createMockApp({
+      jxa: async () => '["Inbox","Today"]',
+      inspect: () => ({
+        appPath: "/Applications/Things3.app",
+        appPathExists: true,
+        fastReadsEnabled: true,
+        dbPath: "/missing/Things.sqlite",
+      }),
+    });
+
+    const result = await callTool(tools.doctor.handler, {});
+    const report = JSON.parse(textOf(result) ?? "{}") as {
+      ok: boolean;
+      checks: Record<string, { ok: boolean; message: string }>;
+    };
+
+    expect(report.ok).toBeTrue();
+    expect(report.checks.sql_read?.ok).toBeFalse();
+    expect(report.checks.jxa_read?.ok).toBeTrue();
+  });
+
+  test("does not report SQL reads healthy for an incomplete Things schema", async () => {
+    const { tools } = createMockApp({
+      jxa: async () => {
+        throw new Error("automation unavailable");
+      },
+      inspect: () => ({
+        appPath: "/Applications/Things3.app",
+        appPathExists: true,
+        fastReadsEnabled: true,
+        dbPath: partialDoctorDbPath,
       }),
     });
 
@@ -659,9 +782,8 @@ describe("doctor", () => {
     };
 
     expect(report.ok).toBeFalse();
-    expect(report.checks.things_access?.ok).toBeTrue();
-    expect(report.checks.fast_reads?.ok).toBeFalse();
-    expect(report.checks.fast_reads?.message).toBe("database is locked");
+    expect(report.checks.sql_read?.ok).toBeFalse();
+    expect(report.checks.jxa_read?.ok).toBeFalse();
   });
 });
 
@@ -780,6 +902,24 @@ describe("search", () => {
 
     await callTool(tools.search.handler, { tag: "ops" });
     expect(jxaCalls[0]?.body).toContain("return tagsOf(t).some(function(tagName)");
+  });
+
+  test("falls back to JXA when the SQLite search fails", async () => {
+    const { tools, jxaCalls } = createMockApp({
+      inspect: () => ({
+        appPath: "/Applications/Things3.app",
+        appPathExists: true,
+        fastReadsEnabled: true,
+        dbPath: "/missing/Things.sqlite",
+      }),
+      jxa: async () => '[{"id":"todo-1","kind":"todo","name":"Fallback"}]',
+    });
+
+    const result = await callTool(tools.search.handler, { query: "Fallback" });
+
+    expect(isError(result)).toBeFalse();
+    expect(textOf(result)).toContain('"Fallback"');
+    expect(jxaCalls).toHaveLength(1);
   });
 
   test("returns search errors from jxa", async () => {
@@ -1634,6 +1774,56 @@ describe("export_markdown", () => {
 
     const result = await callTool(tools.export_markdown.handler, { list: "inbox" });
     expect(textOf(result)).toBe("# Inbox\n\n*(empty)*\n");
+  });
+
+  test("falls back to JXA for every SQL-backed export selector when SQLite fails", async () => {
+    const cases = [
+      {
+        selector: { id: "todo-1" },
+        response: JSON.stringify({ kind: "todo", id: "todo-1", name: "Fallback", status: "open" }),
+      },
+      {
+        selector: { project: "Launch" },
+        response: JSON.stringify({ kind: "project", id: "project-1", name: "Launch", status: "open", todos: [] }),
+      },
+      { selector: { area: "Work" }, response: "[]" },
+      { selector: { list: "today" }, response: "[]" },
+    ];
+
+    for (const entry of cases) {
+      const { tools, jxaCalls } = createMockApp({
+        inspect: () => ({
+          appPath: "/Applications/Things3.app",
+          appPathExists: true,
+          fastReadsEnabled: true,
+          dbPath: "/missing/Things.sqlite",
+        }),
+        jxa: async () => entry.response,
+      });
+
+      const result = await callTool(tools.export_markdown.handler, entry.selector);
+
+      expect(isError(result)).toBeFalse();
+      expect(jxaCalls).toHaveLength(1);
+    }
+  });
+
+  test("keeps computed-list exports on JXA when auxiliary SQLite helpers fail", async () => {
+    const { tools, jxaCalls } = createMockApp({
+      fastListRead: async () => {
+        throw new Error("database is locked");
+      },
+      sortListItems: () => {
+        throw new Error("database is locked");
+      },
+      jxa: async () => '[{"id":"todo-1","kind":"todo","name":"Fallback","status":"open"}]',
+    });
+
+    const result = await callTool(tools.export_markdown.handler, { list: "anytime" });
+
+    expect(isError(result)).toBeFalse();
+    expect(textOf(result)).toContain("Fallback");
+    expect(jxaCalls).toHaveLength(1);
   });
 
   test("surfaces errors from jxa", async () => {

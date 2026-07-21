@@ -229,6 +229,24 @@ function withDb<T>(dbPath: string, fn: (db: Database) => T): T {
   }
 }
 
+export function probeSqlRead(dbPath: string): void {
+  withDb(dbPath, (db) => {
+    const schemaChecks = [
+      `select uuid, type, status, title, notes, deadline, startDate, stopDate,
+        creationDate, todayIndex, "index", userModificationDate,
+        openUntrashedLeafActionsCount, project, area, heading, trashed, start
+       from TMTask limit 1`,
+      `select uuid, title, "index" from TMArea limit 1`,
+      `select uuid, title, "index" from TMTag limit 1`,
+      `select tasks, tags from TMTaskTag limit 1`,
+      `select task, title, status, "index" from TMChecklistItem limit 1`,
+    ];
+    for (const query of schemaChecks) {
+      db.query(query).get();
+    }
+  });
+}
+
 export function readList(dbPath: string, list: string, options: SqlReadOptions): Array<Record<string, unknown>> {
   return withDb(dbPath, (db) => {
     const { where, params, orderBy } = buildListWhere(list, options);

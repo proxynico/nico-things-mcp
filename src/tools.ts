@@ -43,6 +43,40 @@ function sqlDbPath(runtime: ThingsRuntime): string | null {
   return runtime.inspect().dbPath;
 }
 
+function trySqlRead<T>(dbPath: string | null, read: (path: string) => T): T | undefined {
+  if (!dbPath) return undefined;
+  try {
+    return read(dbPath);
+  } catch {
+    return undefined;
+  }
+}
+
+async function tryFastListRead(
+  runtime: ThingsRuntime,
+  list: string,
+  options: sqlread.SqlReadOptions,
+  callOptions: RuntimeCallOptions,
+): Promise<string | null> {
+  try {
+    return await runtime.fastListRead(list, options, callOptions);
+  } catch {
+    return null;
+  }
+}
+
+function trySortListItems(
+  runtime: ThingsRuntime,
+  list: string,
+  items: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  try {
+    return runtime.sortListItems(list, items);
+  } catch {
+    return items;
+  }
+}
+
 const TERMINAL_MARKDOWN_LISTS = new Set(["logbook", "trash"]);
 const DEFAULT_RESULT_LIMIT = 100;
 const MAX_RESULT_LIMIT = 500;
@@ -150,7 +184,7 @@ async function readBuiltinListJson(
   skipSqlHelpers = false,
 ): Promise<MdItem[]> {
   if (!skipSqlHelpers) {
-    const fast = await runtime.fastListRead(list, options, callOptions);
+    const fast = await tryFastListRead(runtime, list, options, callOptions);
     if (fast != null) {
       return JSON.parse(fast) as MdItem[];
     }
@@ -182,7 +216,7 @@ return JSON.stringify(items);`,
   );
 
   const items = JSON.parse(normalizeThingsJson(mixed)) as Array<Record<string, unknown>>;
-  const sorted = skipSqlHelpers ? items as MdItem[] : runtime.sortListItems(list, items) as MdItem[];
+  const sorted = skipSqlHelpers ? items as MdItem[] : trySortListItems(runtime, list, items) as MdItem[];
   const start = options.offset ?? 0;
   return options.limit != null ? sorted.slice(start, start + options.limit) : sorted.slice(start);
 }
@@ -204,69 +238,39 @@ async function applyQuietUpdate(
 
 async function buildDoctorReport(runtime: ThingsRuntime, options: RuntimeCallOptions = {}): Promise<string> {
   const inspection = runtime.inspect();
-  const checks: Record<string, Record<string, unknown>> = {
-    app_path: {
-      ok: inspection.appPathExists,
-      path: inspection.appPath,
-      message: inspection.appPathExists ? "Things app path exists" : "Things app path does not exist",
-    },
-    auth_token: {
-      ok: Boolean(runtime.token),
-      configured: Boolean(runtime.token),
-      message: runtime.token
-        ? "THINGS_AUTH_TOKEN is configured for JSON update paths"
-        : "THINGS_AUTH_TOKEN is missing; JSON update paths are unavailable",
-    },
-  };
+  const checks: Record<string, Record<string, unknown>> = {};
+  let sqlReadOk = false;
+  let jxaReadOk = false;
 
-  let ok = inspection.appPathExists;
-
-  try {
-    await verifyThingsAccess(runtime, options);
-    checks.things_access = {
-      ok: true,
-      message: "Things automation is reachable",
-    };
-  } catch (error) {
-    checks.things_access = {
+  if (!COSITAS_SQL_READS || !inspection.fastReadsEnabled) {
+    checks.sql_read = {
       ok: false,
-      message: errmsg(error),
-    };
-    ok = false;
-  }
-
-  if (!inspection.fastReadsEnabled) {
-    checks.fast_reads = {
-      ok: true,
       enabled: false,
       available: false,
-      db_path: null,
-      message: "Fast SQLite reads are disabled by configuration",
+      db_path: inspection.dbPath,
+      message: "SQLite reads are disabled by configuration",
     };
   } else if (!inspection.dbPath) {
-    checks.fast_reads = {
-      ok: true,
+    checks.sql_read = {
+      ok: false,
       enabled: true,
       available: false,
       db_path: null,
-      message: "No Things database found; falling back to JXA reads",
+      message: "No Things database found",
     };
   } else {
     try {
-      const fast = await runtime.fastListRead("logbook", { limit: 1, offset: 0 }, options);
-      if (fast == null) {
-        throw new Error("Fast SQLite reads are not available");
-      }
-      checks.fast_reads = {
+      sqlread.probeSqlRead(inspection.dbPath);
+      sqlReadOk = true;
+      checks.sql_read = {
         ok: true,
         enabled: true,
         available: true,
         db_path: inspection.dbPath,
-        message: "Fast SQLite reads are available",
+        message: "SQLite reads are available",
       };
     } catch (error) {
-      ok = false;
-      checks.fast_reads = {
+      checks.sql_read = {
         ok: false,
         enabled: true,
         available: false,
@@ -276,7 +280,31 @@ async function buildDoctorReport(runtime: ThingsRuntime, options: RuntimeCallOpt
     }
   }
 
-  return JSON.stringify({ ok, checks });
+  try {
+    await verifyThingsAccess(runtime, options);
+    jxaReadOk = true;
+    checks.jxa_read = {
+      ok: true,
+      app_path: inspection.appPath,
+      message: "JXA reads are available",
+    };
+  } catch (error) {
+    checks.jxa_read = {
+      ok: false,
+      app_path: inspection.appPath,
+      message: errmsg(error),
+    };
+  }
+
+  checks.json_writes = {
+    ok: Boolean(runtime.token),
+    configured: Boolean(runtime.token),
+    message: runtime.token
+      ? "THINGS_AUTH_TOKEN is configured for JSON writes"
+      : "THINGS_AUTH_TOKEN is missing; JSON writes are unavailable",
+  };
+
+  return JSON.stringify({ ok: sqlReadOk || jxaReadOk, checks });
 }
 
 export function registerTools(server: McpServer, runtime: ThingsRuntime): Record<string, RegisteredTool> {
@@ -285,7 +313,7 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime): Record
   tools.doctor = server.registerTool(
     "doctor",
     {
-      description: "Run non-mutating health checks for Things app access, auth token setup, and fast-read availability.",
+      description: "Report independent SQLite read, JXA read, and authenticated JSON write capabilities.",
       inputSchema: {},
       annotations: READ_ONLY,
     },
@@ -348,7 +376,8 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime): Record
 
       try {
         if (list === "projects") {
-          if (db) return ok(JSON.stringify(sqlread.listProjects(db)));
+          const projects = trySqlRead(db, sqlread.listProjects);
+          if (projects !== undefined) return ok(JSON.stringify(projects));
           return ok(
             normalizeThingsJson(
               await runtime.jxa(
@@ -363,7 +392,8 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime): Record
         }
 
         if (list === "areas") {
-          if (db) return ok(JSON.stringify(sqlread.listAreas(db)));
+          const areas = trySqlRead(db, sqlread.listAreas);
+          if (areas !== undefined) return ok(JSON.stringify(areas));
           return ok(
             await runtime.jxa(
               `return JSON.stringify(app.areas().map(function(a){
@@ -376,7 +406,8 @@ return {id:a.id(), name:a.name()};
         }
 
         if (list === "tags") {
-          if (db) return ok(JSON.stringify(sqlread.listTags(db)));
+          const tags = trySqlRead(db, sqlread.listTags);
+          if (tags !== undefined) return ok(JSON.stringify(tags));
           return ok(
             await runtime.jxa(
               `return JSON.stringify(app.tags().map(function(t){
@@ -389,23 +420,21 @@ return {id:t.id(), name:t.name()};
         }
 
         if (id) {
-          if (db) {
-            const item = sqlread.readById(db, id);
-            if (item) return ok(JSON.stringify(item));
-          }
+          const item = trySqlRead(db, (path) => sqlread.readById(path, id));
+          if (item) return ok(JSON.stringify(item));
           return ok(await readItemJson(runtime, id, options));
         }
 
         if (project) {
-          if (db) {
-            const todos = sqlread.readProjectTodos(db, project, {
+          const todos = trySqlRead(db, (path) =>
+            sqlread.readProjectTodos(path, project, {
               limit: limit ?? undefined,
               offset: offset ?? 0,
               completed_after,
               completed_before,
-            });
-            if (todos) return ok(JSON.stringify(todos));
-          }
+            }),
+          );
+          if (todos != null) return ok(JSON.stringify(todos));
           return ok(
             normalizeThingsJson(
               await runtime.jxa(
@@ -425,34 +454,31 @@ return JSON.stringify(applyReadWindow(p.toDos()).map(todoOf));`,
         }
 
         if (area) {
-          if (db) return ok(JSON.stringify(sqlread.readAreaProjects(db, area)));
+          const projects = trySqlRead(db, (path) => sqlread.readAreaProjects(path, area));
+          if (projects !== undefined) return ok(JSON.stringify(projects));
           return ok(await readAreaProjectsJson(runtime, area, options));
         }
 
         const pageLimit = defaultLimit(limit);
         const pageOffset = offset ?? 0;
         if (db && sqlread.SQL_SUPPORTED_LISTS.has(list!)) {
-          try {
-            return ok(
-              JSON.stringify(
-                sqlread.readList(db, list!, {
-                  limit: pageLimit,
-                  offset: pageOffset,
-                  completed_after,
-                  completed_before,
-                }),
-              ),
-            );
-          } catch {
-            return ok(JSON.stringify(await readBuiltinListJson(runtime, list!, {
+          const items = trySqlRead(db, (path) =>
+            sqlread.readList(path, list!, {
               limit: pageLimit,
               offset: pageOffset,
               completed_after,
               completed_before,
-            }, options, true)));
-          }
+            }),
+          );
+          if (items !== undefined) return ok(JSON.stringify(items));
+          return ok(JSON.stringify(await readBuiltinListJson(runtime, list!, {
+            limit: pageLimit,
+            offset: pageOffset,
+            completed_after,
+            completed_before,
+          }, options, true)));
         }
-        const fast = await runtime.fastListRead(list!, {
+        const fast = await tryFastListRead(runtime, list!, {
           limit: pageLimit,
           offset: pageOffset,
           completed_after,
@@ -487,7 +513,8 @@ return JSON.stringify(items);`,
           options,
         );
 
-        const sorted = runtime.sortListItems(
+        const sorted = trySortListItems(
+          runtime,
           list!,
           JSON.parse(normalizeThingsJson(mixed)) as Array<Record<string, unknown>>,
         );
@@ -519,9 +546,12 @@ return JSON.stringify(items);`,
       const pageOffset = offset ?? 0;
       try {
         const db = sqlDbPath(runtime);
-        if (db) {
+        const sqlResults = trySqlRead(db, (path) =>
+          sqlread.search(path, { query, tag, limit: pageLimit, offset: pageOffset }),
+        );
+        if (sqlResults !== undefined) {
           return ok(
-            JSON.stringify(sqlread.search(db, { query, tag, limit: pageLimit, offset: pageOffset })),
+            JSON.stringify(sqlResults),
           );
         }
         return ok(
@@ -584,45 +614,37 @@ return JSON.stringify(results.map(todoOf));`,
 
       try {
         if (id) {
-          if (db) {
-            const item = sqlread.readItemForExport(db, id);
-            if (item) return ok(renderItem(item as MdItem, opts));
-          }
-          const item = JSON.parse(await readItemForExport(runtime, id, options)) as MdItem;
-          return ok(renderItem(item, opts));
+          const item = trySqlRead(db, (path) => sqlread.readItemForExport(path, id));
+          if (item) return ok(renderItem(item as MdItem, opts));
+          const jxaItem = JSON.parse(await readItemForExport(runtime, id, options)) as MdItem;
+          return ok(renderItem(jxaItem, opts));
         }
 
         if (project) {
-          if (db) {
-            const proj = sqlread.readProjectForExport(db, project);
-            if (proj) return ok(renderProject(proj as MdProject, opts));
-          }
-          const proj = JSON.parse(await readProjectForExport(runtime, project, options)) as MdProject;
-          return ok(renderProject(proj, opts));
+          const proj = trySqlRead(db, (path) => sqlread.readProjectForExport(path, project));
+          if (proj) return ok(renderProject(proj as MdProject, opts));
+          const jxaProject = JSON.parse(await readProjectForExport(runtime, project, options)) as MdProject;
+          return ok(renderProject(jxaProject, opts));
         }
 
         if (area) {
-          if (db) {
-            return ok(renderArea(area, sqlread.readAreaProjects(db, area) as MdProject[], opts));
-          }
-          const projects = JSON.parse(await readAreaProjectsJson(runtime, area, options)) as MdProject[];
-          return ok(renderArea(area, projects, opts));
+          const projects = trySqlRead(db, (path) => sqlread.readAreaProjects(path, area));
+          if (projects !== undefined) return ok(renderArea(area, projects as MdProject[], opts));
+          const jxaProjects = JSON.parse(await readAreaProjectsJson(runtime, area, options)) as MdProject[];
+          return ok(renderArea(area, jxaProjects, opts));
         }
 
-        const items =
-          db && sqlread.SQL_SUPPORTED_LISTS.has(list!)
-            ? (sqlread.readList(db, list!, {
-                limit: defaultLimit(limit),
-                offset: offset ?? 0,
-                completed_after,
-                completed_before,
-              }) as MdItem[])
-            : await readBuiltinListJson(runtime, list!, {
-                limit: defaultLimit(limit),
-                offset: offset ?? 0,
-                completed_after,
-                completed_before,
-              }, options);
+        const listOptions = {
+          limit: defaultLimit(limit),
+          offset: offset ?? 0,
+          completed_after,
+          completed_before,
+        };
+        const sqlAttempted = db != null && sqlread.SQL_SUPPORTED_LISTS.has(list!);
+        const sqlItems = sqlAttempted
+          ? trySqlRead(db, (path) => sqlread.readList(path, list!, listOptions) as MdItem[])
+          : undefined;
+        const items = sqlItems ?? await readBuiltinListJson(runtime, list!, listOptions, options, sqlAttempted);
         return ok(renderList(list!, items, opts));
       } catch (error) {
         return fail(errmsg(error));
