@@ -528,6 +528,25 @@ describe("read", () => {
     expect(jxaCalls[0]?.args).toEqual({ n: "Work" });
   });
 
+  test("falls back to JXA when a direct SQLite read fails", async () => {
+    const { tools, jxaCalls } = createMockApp({
+      inspect: () => ({
+        appPath: "/Applications/Things3.app",
+        appPathExists: true,
+        fastReadsEnabled: true,
+        dbPath: "/missing/Things.sqlite",
+      }),
+      jxa: async () => '[{"id":"todo-1","kind":"todo","name":"Fallback"}]',
+      sortListItems: (_list, items) => items,
+    });
+
+    const result = await callTool(tools.read.handler, { list: "today" });
+
+    expect(isError(result)).toBeFalse();
+    expect(textOf(result)).toContain('"Fallback"');
+    expect(jxaCalls).toHaveLength(1);
+  });
+
   test("returns read errors from jxa", async () => {
     const { tools } = createMockApp({
       jxa: async () => {
@@ -916,6 +935,26 @@ describe("add_project", () => {
 });
 
 describe("update", () => {
+  test("rejects an id-only update before invoking Things", async () => {
+    const { tools, jxaCalls } = createMockApp();
+
+    const result = await callTool(tools.update.handler, { id: "1" });
+
+    expect(isError(result)).toBeTrue();
+    expect(textOf(result)).toBe("Provide at least one field to update");
+    expect(jxaCalls).toHaveLength(0);
+  });
+
+  test("rejects an empty update title before invoking Things", async () => {
+    const { tools, jxaCalls } = createMockApp();
+
+    const result = await callTool(tools.update.handler, { id: "1", title: "" });
+
+    expect(isError(result)).toBeTrue();
+    expect(textOf(result)).toBe("title must not be empty");
+    expect(jxaCalls).toHaveLength(0);
+  });
+
   test("accepts empty deadline to clear an item", () => {
     const { tools } = createMockApp();
     expect(() => parseToolInput(tools.update, { id: "1", deadline: "" })).not.toThrow();

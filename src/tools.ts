@@ -49,7 +49,8 @@ const MAX_RESULT_LIMIT = 500;
 
 const READ_ONLY = { readOnlyHint: true, openWorldHint: false };
 const ADDITIVE_WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
-const MUTATING_WRITE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
+const MUTATING_WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+const DESTRUCTIVE_WRITE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
 
 function requestOptions(extra: { signal?: AbortSignal }): RuntimeCallOptions {
   return { signal: extra.signal };
@@ -146,10 +147,13 @@ async function readBuiltinListJson(
     completed_before?: string;
   },
   callOptions: RuntimeCallOptions = {},
+  skipSqlHelpers = false,
 ): Promise<MdItem[]> {
-  const fast = await runtime.fastListRead(list, options, callOptions);
-  if (fast != null) {
-    return JSON.parse(fast) as MdItem[];
+  if (!skipSqlHelpers) {
+    const fast = await runtime.fastListRead(list, options, callOptions);
+    if (fast != null) {
+      return JSON.parse(fast) as MdItem[];
+    }
   }
 
   const mixed = await runtime.jxa(
@@ -177,10 +181,8 @@ return JSON.stringify(items);`,
     callOptions,
   );
 
-  const sorted = runtime.sortListItems(
-    list,
-    JSON.parse(normalizeThingsJson(mixed)) as Array<Record<string, unknown>>,
-  ) as MdItem[];
+  const items = JSON.parse(normalizeThingsJson(mixed)) as Array<Record<string, unknown>>;
+  const sorted = skipSqlHelpers ? items as MdItem[] : runtime.sortListItems(list, items) as MdItem[];
   const start = options.offset ?? 0;
   return options.limit != null ? sorted.slice(start, start + options.limit) : sorted.slice(start);
 }
@@ -430,16 +432,25 @@ return JSON.stringify(applyReadWindow(p.toDos()).map(todoOf));`,
         const pageLimit = defaultLimit(limit);
         const pageOffset = offset ?? 0;
         if (db && sqlread.SQL_SUPPORTED_LISTS.has(list!)) {
-          return ok(
-            JSON.stringify(
-              sqlread.readList(db, list!, {
-                limit: pageLimit,
-                offset: pageOffset,
-                completed_after,
-                completed_before,
-              }),
-            ),
-          );
+          try {
+            return ok(
+              JSON.stringify(
+                sqlread.readList(db, list!, {
+                  limit: pageLimit,
+                  offset: pageOffset,
+                  completed_after,
+                  completed_before,
+                }),
+              ),
+            );
+          } catch {
+            return ok(JSON.stringify(await readBuiltinListJson(runtime, list!, {
+              limit: pageLimit,
+              offset: pageOffset,
+              completed_after,
+              completed_before,
+            }, options, true)));
+          }
         }
         const fast = await runtime.fastListRead(list!, {
           limit: pageLimit,
@@ -813,6 +824,23 @@ return JSON.stringify({id: proj.id(), name: proj.name(), status: proj.status()})
       annotations: MUTATING_WRITE,
     },
     async (params, extra) => {
+      const updateFields = [
+        params.title,
+        params.notes,
+        params.when,
+        params.deadline,
+        params.tags,
+        params.checklist_items,
+        params.completed,
+        params.canceled,
+        params.list,
+      ];
+      if (!updateFields.some((value) => value !== undefined)) {
+        return fail("Provide at least one field to update");
+      }
+      if (params.title === "") {
+        return fail("title must not be empty");
+      }
       const options = requestOptions(extra);
       try {
         const specialWhen = usesSpecialWhen(params.when) ? params.when : undefined;
@@ -950,7 +978,7 @@ return JSON.stringify({kind: type, item: type === "todo" ? todoOf(item) : projec
       inputSchema: {
       id: z.string().describe("Todo, project, or area ID"),
       },
-      annotations: MUTATING_WRITE,
+      annotations: DESTRUCTIVE_WRITE,
     },
     async ({ id }, extra) => {
       const options = requestOptions(extra);
@@ -988,7 +1016,7 @@ return JSON.stringify({kind: type, item: type === "todo" ? todoOf(item) : projec
       inputSchema: {
       confirm: z.boolean().describe("Must be true to permanently empty Things Trash"),
       },
-      annotations: MUTATING_WRITE,
+      annotations: DESTRUCTIVE_WRITE,
     },
     async ({ confirm }, extra) => {
       const options = requestOptions(extra);
