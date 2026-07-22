@@ -53,9 +53,10 @@ Create `assets/nico-things-mcp-icon.svg` with exactly:
   <title id="title">Nico Things MCP</title>
   <desc id="description">A white plug with blue prongs and a navy checkmark on a navy rounded square.</desc>
   <rect width="100" height="100" rx="30" fill="#18324A"/>
-  <path d="M39 18V33M61 18V33" stroke="#55B8FF" stroke-width="8" stroke-linecap="round"/>
+  <rect x="35" y="14" width="8" height="23" rx="4" fill="#55B8FF"/>
+  <rect x="57" y="14" width="8" height="23" rx="4" fill="#55B8FF"/>
   <path d="M27 30H73V59C73 72 63 82 50 82C37 82 27 72 27 59V30Z" fill="#FFFFFF"/>
-  <path d="M38 53L47 62L64 41" stroke="#18324A" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M34.82 53C34.82 51.85 35.26 50.7 36.14 49.82C37.9 48.06 40.74 48.06 42.5 49.82L47.07 54.39L60.5 37.8C62.06 35.87 64.89 35.58 66.82 37.14C68.75 38.7 69.04 41.53 67.48 43.46L50.9 63.94C50.1 64.93 48.91 65.54 47.64 65.59C46.37 65.65 45.13 65.16 44.23 64.26L36.14 56.17C35.26 55.29 34.82 54.15 34.82 53Z" fill="#18324A"/>
 </svg>
 ```
 
@@ -69,9 +70,10 @@ Create `assets/favicon.svg` with exactly:
   <title id="title">Nico Things MCP favicon</title>
   <desc id="description">A white plug with blue prongs and a navy checkmark on a navy rounded square.</desc>
   <rect width="100" height="100" rx="30" fill="#18324A"/>
-  <path d="M39 18V33M61 18V33" stroke="#55B8FF" stroke-width="8" stroke-linecap="round"/>
+  <rect x="35" y="14" width="8" height="23" rx="4" fill="#55B8FF"/>
+  <rect x="57" y="14" width="8" height="23" rx="4" fill="#55B8FF"/>
   <path d="M27 30H73V59C73 72 63 82 50 82C37 82 27 72 27 59V30Z" fill="#FFFFFF"/>
-  <path d="M38 53L47 62L64 41" stroke="#18324A" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M34.82 53C34.82 51.85 35.26 50.7 36.14 49.82C37.9 48.06 40.74 48.06 42.5 49.82L47.07 54.39L60.5 37.8C62.06 35.87 64.89 35.58 66.82 37.14C68.75 38.7 69.04 41.53 67.48 43.46L50.9 63.94C50.1 64.93 48.91 65.54 47.64 65.59C46.37 65.65 45.13 65.16 44.23 64.26L36.14 56.17C35.26 55.29 34.82 54.15 34.82 53Z" fill="#18324A"/>
 </svg>
 ```
 
