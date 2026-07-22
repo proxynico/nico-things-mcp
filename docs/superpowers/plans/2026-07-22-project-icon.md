@@ -190,7 +190,7 @@ Run:
 magick assets/nico-things-mcp-icon-512.png -resize 128x128 .context/icon-128.png
 magick assets/nico-things-mcp-icon-512.png -resize 32x32 .context/icon-32.png
 magick assets/nico-things-mcp-icon-512.png -resize 16x16 .context/icon-16.png
-magick montage .context/icon-16.png .context/icon-32.png .context/icon-128.png assets/nico-things-mcp-icon-512.png -thumbnail '160x160>' -tile 4x1 -geometry +24+24 -background '#E9EDF1' .context/icon-size-check.png
+magick montage .context/icon-16.png .context/icon-32.png .context/icon-128.png assets/nico-things-mcp-icon-512.png -thumbnail '160x160>' -tile 4x1 -geometry +24+24 -background '#E9EDF1' -font /System/Library/Fonts/Helvetica.ttc .context/icon-size-check.png
 ```
 
 Open `.context/icon-size-check.png` with the image viewer. Expected: the plug and check remain distinct at all four sizes; the blue prongs do not cover the white body.
