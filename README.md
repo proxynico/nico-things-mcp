@@ -1,4 +1,8 @@
-# nico-things-mcp
+<p align="center">
+  <img src="assets/nico-things-mcp-icon.svg" width="96" height="96" alt="Nico Things MCP icon">
+</p>
+
+<h1 align="center">nico-things-mcp</h1>
 
 A local [Model Context Protocol](https://modelcontextprotocol.io/) server for Things 3 on macOS. It exposes structured read, search, export, create, update, delete, show, health, and statistics tools while keeping Things data on the Mac.
 
