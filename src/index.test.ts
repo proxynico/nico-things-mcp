@@ -374,6 +374,9 @@ describe("read", () => {
     expect(textOf(result)).toBe('{"id":"1"}');
     expect(jxaCalls).toHaveLength(1);
     expect(jxaCalls[0]?.body).toContain("toDoChecklistItems");
+    expect(jxaCalls[0]?.body.indexOf("app.projects.byId")).toBeLessThan(
+      jxaCalls[0]?.body.indexOf("app.toDos.byId") ?? -1,
+    );
     expect(jxaCalls[0]?.args).toEqual({ id: "1" });
     expect(jxaCalls[0]?.signal).toBe(controller.signal);
   });
@@ -1116,6 +1119,9 @@ describe("update", () => {
     expect(textOf(result)).toBe('{"id":"1","name":"Updated"}');
     expect(jxaCalls[0]?.body).toContain('return JSON.stringify({kind: type, item:');
     expect(jxaCalls[0]?.body).toContain("project.id();");
+    expect(jxaCalls[0]?.body.indexOf("app.projects.byId")).toBeLessThan(
+      jxaCalls[0]?.body.indexOf("app.toDos.byId") ?? -1,
+    );
     expect(quietCalls).toHaveLength(0);
     expect(quietJsonCalls).toHaveLength(0);
   });
@@ -1245,7 +1251,7 @@ describe("bulk_update", () => {
   });
 
   test("updates many items with one json payload", async () => {
-    const { tools, quietJsonCalls } = createMockApp({
+    const { tools, quietJsonCalls, jxaCalls } = createMockApp({
       jxa: async () => '[{"id":"1","kind":"todo"},{"id":"2","kind":"project"}]',
     });
 
@@ -1256,6 +1262,9 @@ describe("bulk_update", () => {
     });
 
     expect(textOf(result)).toContain('"updated":true');
+    expect(jxaCalls[0]?.body.indexOf("app.projects.byId")).toBeLessThan(
+      jxaCalls[0]?.body.indexOf("app.toDos.byId") ?? -1,
+    );
     expect(quietJsonCalls).toEqual([
       {
         operations: [
@@ -1343,6 +1352,9 @@ describe("delete and trash", () => {
     const result = await callTool(tools.delete.handler, { id: "1" });
     expect(textOf(result)).toBe('{"id":"1","kind":"todo","deleted":true}');
     expect(jxaCalls[0]?.body).toContain("app.delete(todo);");
+    expect(jxaCalls[0]?.body.indexOf("app.projects.byId")).toBeLessThan(
+      jxaCalls[0]?.body.indexOf("app.toDos.byId") ?? -1,
+    );
   });
 
   test("empties trash", async () => {

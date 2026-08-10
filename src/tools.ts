@@ -115,13 +115,13 @@ async function readItemJson(
   return r;
 };
 try {
-  var t = app.toDos.byId(P.id); t.id();
-  return JSON.stringify(withChecklist(t));
-} catch(e) {
   var p = app.projects.byId(P.id); p.id();
   var r = projectOf(p);
   r.todos = p.toDos().map(P.childChecklists ? withChecklist : todoOf);
   return JSON.stringify(r);
+} catch(e) {
+  var t = app.toDos.byId(P.id); t.id();
+  return JSON.stringify(withChecklist(t));
 }`,
       childChecklists ? { id, childChecklists: true } : { id },
       options,
@@ -875,8 +875,8 @@ return JSON.stringify({id: proj.id(), name: proj.name(), status: proj.status()})
 
         const result = await runtime.jxa(
           `var item, type;
-try { item = app.toDos.byId(P.id); item.id(); type = "todo"; }
-catch(e) { item = app.projects.byId(P.id); item.id(); type = "project"; }
+try { item = app.projects.byId(P.id); item.id(); type = "project"; }
+catch(e) { item = app.toDos.byId(P.id); item.id(); type = "todo"; }
 if (P.hasOwnProperty("title") && P.title) item.name = P.title;
 if (P.hasOwnProperty("notes")) item.notes = P.notes || "";
 if (P.hasOwnProperty("tags") && !P.tagsNeedJson) item.tagNames = P.tags ? P.tags.join(", ") : "";
@@ -956,11 +956,11 @@ return JSON.stringify({kind: type, item: type === "todo" ? todoOf(item) : projec
         const detail = await runtime.jxa(
           `return JSON.stringify(P.ids.map(function(id) {
   try {
-    var todo = app.toDos.byId(id); todo.id();
-    return {id: id, kind: "todo"};
-  } catch(e) {
     var project = app.projects.byId(id); project.id();
     return {id: id, kind: "project"};
+  } catch(e) {
+    var todo = app.toDos.byId(id); todo.id();
+    return {id: id, kind: "todo"};
   }
 }));`,
           { ids: params.ids },
@@ -1007,14 +1007,14 @@ return JSON.stringify({kind: type, item: type === "todo" ? todoOf(item) : projec
       try {
         const result = await runtime.jxa(
           `try {
-  var todo = app.toDos.byId(P.id); todo.id();
-  app.delete(todo);
-  return JSON.stringify({id: P.id, kind: "todo", deleted: true});
+  var project = app.projects.byId(P.id); project.id();
+  app.delete(project);
+  return JSON.stringify({id: P.id, kind: "project", deleted: true});
 } catch(e1) {
   try {
-    var project = app.projects.byId(P.id); project.id();
-    app.delete(project);
-    return JSON.stringify({id: P.id, kind: "project", deleted: true});
+    var todo = app.toDos.byId(P.id); todo.id();
+    app.delete(todo);
+    return JSON.stringify({id: P.id, kind: "todo", deleted: true});
   } catch(e2) {
     var area = app.areas.byId(P.id); area.id();
     app.delete(area);
