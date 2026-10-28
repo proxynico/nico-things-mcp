@@ -105,7 +105,7 @@ function selectTasks(
   options: ReadOptions = {},
   checklists = false,
 ): Item[] {
-  const clauses = [...where];
+  const clauses = [NOT_TEMPLATE, ...where];
   const values = [...params];
   if (options.completed_after) {
     clauses.push("t.stopDate >= ?");
@@ -121,7 +121,15 @@ function selectTasks(
   return rows.map(toItem);
 }
 
-const OPEN = ["t.type in (0, 1)", "t.trashed = 0", "t.status = 0", "coalesce(p.trashed, 0) = 0"];
+// A repeating todo's template row never shows in Things; its instances do.
+const NOT_TEMPLATE = "t.rt1_recurrenceRule is null";
+const OPEN = [
+  "t.type in (0, 1)",
+  "t.trashed = 0",
+  "t.status = 0",
+  "coalesce(h.trashed, 0) = 0",
+  "coalesce(p.trashed, 0) = 0",
+];
 const BY_AREA = 'coalesce(a."index", pa."index"), p."index", t."index"';
 
 // The start column is 0 for Inbox, 1 for Anytime, and 2 for Someday or a scheduled startDate.
@@ -143,8 +151,12 @@ function listQuery(list: ListName, today: number): { where: string[]; params: nu
       };
     case "anytime":
       return {
-        where: [...OPEN, "(t.start = 1 or (t.start = 2 and t.startDate <= ?))", "coalesce(p.start, 1) = 1"],
-        params: [today],
+        where: [
+          ...OPEN,
+          "(t.start = 1 or (t.start = 2 and t.startDate <= ?))",
+          "(p.uuid is null or p.start = 1 or p.startDate <= ?)",
+        ],
+        params: [today, today],
         orderBy: BY_AREA,
       };
     case "upcoming":
@@ -184,7 +196,7 @@ function findProject(db: Database, name: string): string | null {
 function projectTodos(db: Database, projectId: string, options: ReadOptions = {}, checklists = false): Item[] {
   return selectTasks(
     db,
-    ["coalesce(t.project, h.project) = ?", "t.type = 0", "t.trashed = 0", "t.status = 0"],
+    ["coalesce(t.project, h.project) = ?", "t.type = 0", "t.trashed = 0", "t.status = 0", "coalesce(h.trashed, 0) = 0"],
     [projectId],
     'h."index", t."index"',
     options,
@@ -253,7 +265,7 @@ export function listTags(dbPath: string): Array<{ id: string; name: string }> {
 // Open todos whose title contains query (case-insensitive) and that carry tag.
 export function search(dbPath: string, options: { query?: string; tag?: string; limit?: number; offset?: number }): Item[] {
   return withDb(dbPath, (db) => {
-    const where = ["t.type = 0", "t.trashed = 0", "t.status = 0"];
+    const where = ["t.type = 0", "t.trashed = 0", "t.status = 0", "coalesce(h.trashed, 0) = 0", "coalesce(p.trashed, 0) = 0"];
     const params: string[] = [];
     if (options.query) {
       where.push("t.title like ? escape '\\'");
@@ -282,10 +294,14 @@ export function stats(dbPath: string, window: StatsWindow): StatsResult {
 
     const countList = (list: ListName): number => {
       const { where, params } = listQuery(list, today);
-      return (db.query(`select count(*) as n ${FROM} where ${where.join(" and ")}`).get(...params) as { n: number }).n;
+      const sql = `select count(*) as n ${FROM} where ${[NOT_TEMPLATE, ...where].join(" and ")}`;
+      return (db.query(sql).get(...params) as { n: number }).n;
     };
     const { n: overdue } = db
-      .query("select count(*) as n from TMTask where trashed = 0 and type = 0 and status = 0 and deadline < ?")
+      .query(
+        `select count(*) as n from TMTask
+         where trashed = 0 and type = 0 and status = 0 and rt1_recurrenceRule is null and deadline < ?`,
+      )
       .get(today) as { n: number };
 
     return { window, ...windowed, overdue, inbox: countList("inbox"), today: countList("today") };

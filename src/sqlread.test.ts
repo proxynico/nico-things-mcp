@@ -29,6 +29,7 @@ describe("readList", () => {
       "t-today-b",
       "t-today-a",
       "t-unconfirmed",
+      "proj-4",
       "t-overdue",
       "t-evening",
     ]);
@@ -36,13 +37,15 @@ describe("readList", () => {
 
   test("anytime includes today's items and project todos but not someday projects", () => {
     const items = ids(sql.readList(dbPath, "anytime"));
-    expect(items.slice(0, 4)).toEqual(["proj-1", "t-ph", "t-pa", "t-pb"]);
+    expect(items.slice(0, 6)).toEqual(["proj-4", "t-started", "proj-1", "t-ph", "t-pa", "t-pb"]);
     expect(items).toContain("t-unconfirmed");
     expect(items).toContain("t-search");
     expect(items).not.toContain("t-inbox");
     expect(items).not.toContain("t-upcoming");
     expect(items).not.toContain("t-later");
     expect(items).not.toContain("proj-3");
+    expect(items).not.toContain("t-dropped");
+    expect(items).not.toContain("t-template");
   });
 
   test("upcoming holds future start dates; someday holds undated start=2 items", () => {
@@ -143,7 +146,7 @@ describe("projects and areas", () => {
   });
 
   test("listProjects, listAreas, and listTags enumerate in Things order", () => {
-    expect(ids(sql.listProjects(dbPath))).toEqual(["proj-1", "proj-3"]);
+    expect(ids(sql.listProjects(dbPath))).toEqual(["proj-1", "proj-3", "proj-4"]);
     expect(sql.listAreas(dbPath)).toEqual([
       { id: "area-1", name: "Work" },
       { id: "area-2", name: "Personal" },
@@ -166,6 +169,7 @@ describe("search", () => {
     expect(sql.search(dbPath, { query: "Logged" })).toEqual([]);
     expect(sql.search(dbPath, { query: "Trashed" })).toEqual([]);
     expect(sql.search(dbPath, { query: "%" })).toEqual([]);
+    expect(sql.search(dbPath, { query: "template" })).toEqual([]);
   });
 
   test("pages results", () => {
@@ -185,7 +189,7 @@ describe("stats", () => {
       created: 2,
       overdue: 1,
       inbox: 1,
-      today: 5,
+      today: 6,
     });
   });
 

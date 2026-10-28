@@ -205,13 +205,14 @@ describe("read", () => {
       "t-today-b",
       "t-today-a",
       "t-unconfirmed",
+      "proj-4",
       "t-overdue",
       "t-evening",
     ]);
     expect(ids(await callTool(tools.read, { list: "logbook", limit: 1, offset: 1 }))).toEqual(["proj-2"]);
     expect(ids(await callTool(tools.read, { project: "Website" }))).toEqual(["t-pa", "t-pb", "t-ph"]);
     expect(ids(await callTool(tools.read, { area: "Work" }))).toEqual(["proj-1", "proj-3"]);
-    expect(ids(await callTool(tools.read, { list: "projects" }))).toEqual(["proj-1", "proj-3"]);
+    expect(ids(await callTool(tools.read, { list: "projects" }))).toEqual(["proj-1", "proj-3", "proj-4"]);
     expect(ids(await callTool(tools.read, { list: "areas" }))).toEqual(["area-1", "area-2"]);
     expect(ids(await callTool(tools.read, { list: "tags" }))).toEqual(["tag-1", "tag-2"]);
     expect(jsonOf(await callTool(tools.read, { id: "t-pa" }))).toMatchObject({
@@ -1040,7 +1041,7 @@ describe("stats", () => {
     const { tools } = createMockApp({ dbPath });
     const result = jsonOf(await callTool(tools.stats, {})) as { window: { since: string; until: string }; today: number };
     expect(result.window.since).toBe(result.window.until);
-    expect(result.today).toBe(5);
+    expect(result.today).toBe(6);
   });
 
   test("defaults since to until and passes an explicit window through", async () => {
