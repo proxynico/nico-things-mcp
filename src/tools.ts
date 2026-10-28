@@ -270,7 +270,7 @@ async function withStoredChecklist({
           return { ...item, checklistItems: checklist.data };
         }
       } catch {
-        break; // The database is unavailable; do not turn an applied write into a failure.
+        break;
       }
       if (expected === undefined || Date.now() >= until) break;
       await pause(50, undefined, options);
@@ -280,17 +280,16 @@ async function withStoredChecklist({
 }
 
 // Applies a JSON update to an item JXA just created or changed, then returns the item as Things now has it.
-async function patchAndReread({ runtime, kind, id, attributes, options = {}, expectedChecklist }: {
+async function patchAndReread({ runtime, kind, id, attributes, expectedChecklist }: {
   runtime: ThingsRuntime;
   kind: "todo" | "project";
   id: string;
   attributes: Record<string, unknown>;
-  options?: RuntimeCallOptions;
   expectedChecklist?: string[];
 }): Promise<string> {
-  await runtime.quietJson([jsonUpdate(kind, id, attributes)], options);
-  const item = await jxaRead<Item>(runtime, JXA_ITEM, { id }, options);
-  return JSON.stringify(await withStoredChecklist({ runtime, item, expected: expectedChecklist, options }));
+  await runtime.quietJson([jsonUpdate(kind, id, attributes)]);
+  const item = await jxaRead<Item>(runtime, JXA_ITEM, { id }, {});
+  return JSON.stringify(await withStoredChecklist({ runtime, item, expected: expectedChecklist, options: {} }));
 }
 
 async function doctorReport(runtime: ThingsRuntime, options: RuntimeCallOptions) {
@@ -512,13 +511,18 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime, request
       });
       if (attributes) requireToken(runtime.token);
 
-      return requests.run({ requestId: request_id, tool: "add_todo", params, signal: options.signal, create: async (recordId) => {
-        const created = await runtime.jxa(JXA_ADD_TODO, { ...params, tagsNeedJson });
-        const { id } = z.object({ id: z.string() }).parse(JSON.parse(created));
-        recordId(id);
-        if (!attributes) return created;
-        return patchAndReread({ runtime, kind: "todo", id, attributes, expectedChecklist: params.checklist_items });
-      } });
+      return requests.run({ requestId: request_id, tool: "add_todo", params, signal: options.signal,
+        preflight: params.list ? async () => {
+          await runtime.jxa('var project = app.projects.byName(P.name); project.id(); return "";', { name: params.list }, options);
+        } : undefined,
+        create: async (recordId) => {
+          const created = await runtime.jxa(JXA_ADD_TODO, { ...params, tagsNeedJson });
+          const { id } = z.object({ id: z.string() }).parse(JSON.parse(created));
+          recordId(id);
+          if (!attributes) return created;
+          return patchAndReread({ runtime, kind: "todo", id, attributes, expectedChecklist: params.checklist_items });
+        },
+      });
     }),
   );
 
@@ -546,13 +550,18 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime, request
       });
       if (attributes) requireToken(runtime.token);
 
-      return requests.run({ requestId: request_id, tool: "add_project", params, signal: options.signal, create: async (recordId) => {
-        const created = await runtime.jxa(JXA_ADD_PROJECT, { ...params, tagsNeedJson });
-        const { id } = z.object({ id: z.string() }).parse(JSON.parse(created));
-        recordId(id);
-        if (!attributes) return created;
-        return patchAndReread({ runtime, kind: "project", id, attributes });
-      } });
+      return requests.run({ requestId: request_id, tool: "add_project", params, signal: options.signal,
+        preflight: params.area ? async () => {
+          await runtime.jxa('var area = app.areas.byName(P.name); area.id(); return "";', { name: params.area }, options);
+        } : undefined,
+        create: async (recordId) => {
+          const created = await runtime.jxa(JXA_ADD_PROJECT, { ...params, tagsNeedJson });
+          const { id } = z.object({ id: z.string() }).parse(JSON.parse(created));
+          recordId(id);
+          if (!attributes) return created;
+          return patchAndReread({ runtime, kind: "project", id, attributes });
+        },
+      });
     }),
   );
 

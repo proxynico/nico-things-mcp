@@ -16,8 +16,6 @@ const recordSchema = z.discriminatedUnion("state", [
   recordFields.extend({ state: z.literal("failed"), result: z.string() }),
 ]);
 
-// Reservations survive reconnects and separate MCP server processes. Never expire a key:
-// forgetting an uncertain create would make its next retry create a duplicate.
 export class CreateRequests {
   private readonly path: string;
   private readonly running = new Map<string, Promise<string>>();
@@ -42,17 +40,22 @@ export class CreateRequests {
     }
   }
 
-  async run({ requestId, tool, params, signal, create }: {
+  async run({ requestId, tool, params, signal, preflight, create }: {
     requestId: string;
     tool: string;
     params: Record<string, unknown>;
     signal?: AbortSignal;
+    preflight?: () => Promise<void>;
     create: (recordId: (id: string) => void) => Promise<string>;
   }): Promise<string> {
     signal?.throwIfAborted();
     const fingerprint = createHash("sha256").update(JSON.stringify([
       tool, Object.fromEntries(Object.entries(params).sort(([a], [b]) => a.localeCompare(b))),
     ])).digest("hex");
+    if (preflight && !this.withDb((db) => db.query("SELECT 1 FROM requests WHERE request_id = ?").get(requestId))) {
+      await preflight();
+      signal?.throwIfAborted();
+    }
     const { inserted, record } = this.withDb((db) => {
       const inserted = db.query("INSERT OR IGNORE INTO requests VALUES (?, ?, 'pending', NULL, NULL)")
         .run(requestId, fingerprint).changes > 0;
@@ -64,11 +67,10 @@ export class CreateRequests {
       if (running) return running;
       if (record.state === "complete") return record.result;
       if (record.state === "failed") throw new Error(record.result);
-      throw new Error(`Create is still running or its outcome is uncertain.${record.item_id ? ` Item ID: ${record.item_id}. Read/update that item.` : " Search Things to reconcile it."} Retry only with this request_id; do not issue a new create.`);
+      throw new Error(`Create has no saved outcome; it may still be running or the server may have stopped.${record.item_id ? ` Item ID: ${record.item_id}. Read/update that item.` : " Search Things to reconcile it before creating anything else."} Retrying cannot restart it; it only returns an outcome if the original server saves one.`);
     }
 
     let itemId: string | undefined;
-    // Do not forward the caller's signal after reservation: finish any write already started.
     const operation = Promise.resolve().then(async () => {
       try {
         const result = await create((id) => {

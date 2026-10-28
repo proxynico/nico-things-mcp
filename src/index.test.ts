@@ -105,6 +105,17 @@ describe("runtime", () => {
     expect(errmsg("plain")).toBe("plain");
   });
 
+  test("errmsg never returns a subprocess command when stderr is empty", () => {
+    for (const stderr of ["", " \n"]) {
+      const error = Object.assign(new Error("Command failed: osascript private-test-argument"), {
+        cmd: "osascript private-test-argument", stderr, signal: "SIGKILL",
+      });
+      expect(errmsg(error)).not.toContain("private-test-argument");
+      expect(errmsg(error)).not.toContain("things://");
+      expect(errmsg(error)).not.toContain("osascript");
+    }
+  });
+
   test("stats day windows use local calendar boundaries", () => {
     const result = spawnSync(
       process.execPath,
@@ -448,7 +459,7 @@ describe("add_project", () => {
 
     await callTool(tools.add_project, { request_id: randomUUID(), title: "Launch", area: "Work", todos: ["Ship it"] });
     expect(jxaCalls[0]?.body).toContain("area.id();");
-    expect(jxaCalls[0]?.body).toContain("t.project = proj;");
+    expect(jxaCalls[1]?.body).toContain("t.project = proj;");
   });
 
   test("patches special when through JSON and re-reads", async () => {

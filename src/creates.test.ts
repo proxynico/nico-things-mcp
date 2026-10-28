@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -69,4 +70,41 @@ test("a request cancelled before creation does not reserve its key", async () =>
   const args = { requestId: "cancel", tool: "add_todo", params: {}, create: async () => "ok" };
   await expect(requests.run({ ...args, signal: AbortSignal.abort() })).rejects.toThrow();
   expect(await requests.run(args)).toBe("ok");
+});
+
+test("failed preflight leaves a request ID free for corrected arguments", async () => {
+  const requests = new CreateRequests({ path: join(dir, "preflight.sqlite") });
+  let creates = 0;
+  const args = { requestId: "fix-destination", tool: "add_todo", params: { list: "Missing" },
+    create: async () => { creates++; return "created"; } };
+  await expect(requests.run({ ...args, preflight: async () => { throw new Error("Project not found"); } }))
+    .rejects.toThrow("Project not found");
+  expect(creates).toBe(0);
+  expect(await requests.run({ ...args, params: { list: "Exists" } })).toBe("created");
+  expect(await requests.run({ ...args, params: { list: "Exists" }, preflight: async () => { throw new Error("Destination since removed"); } })).toBe("created");
+  expect(creates).toBe(1);
+});
+
+test("subprocess arguments are absent from failed outcomes, stored records, and replays", async () => {
+  const path = join(dir, "safe-errors.sqlite");
+  const args = { requestId: "safe-error", tool: "add_todo", params: { title: "Partial" },
+    create: async (recordId: (id: string) => void) => {
+      recordId("safe-id");
+      throw Object.assign(new Error("Command failed: private-test-argument"), { cmd: "private-test-argument", stderr: "" });
+    } };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await new CreateRequests({ path }).run(args);
+      throw new Error("Expected a failed create");
+    } catch (error) {
+      expect(String(error)).toContain("safe-id");
+      expect(String(error)).not.toContain("private-test-argument");
+    }
+  }
+  const db = new Database(path, { readonly: true });
+  try {
+    expect(JSON.stringify(db.query("select * from requests").all())).not.toContain("private-test-argument");
+  } finally {
+    db.close();
+  }
 });
