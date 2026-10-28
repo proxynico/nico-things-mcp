@@ -45,6 +45,12 @@ No credential is required for normal JXA reads and writes. Some authenticated JS
 
 Reads come straight from Things' local SQLite database. If the database can't be read, they fall back to asking Things over JXA. `stats` needs the database.
 
+Checklist details require SQLite: Things' scripting interface cannot read them. Item reads and write replies return `checklistItems: null` when those details are unavailable, rather than claiming the checklist is empty. Write replies keep fresh fields from Things and wait up to two seconds for a changed checklist to reach SQLite.
+
+`add_todo` and `add_project` require a `request_id` (for example, a UUID). Generate one for each intended item, and reuse it with identical arguments after a timeout. The server finishes a started create even if its caller cancels, and a retry returns the original result. New IDs allow intentional duplicate titles.
+
+Create outcomes are kept privately in `~/.local/state/nico-things-mcp/creates.sqlite`, shared by MCP server processes on that Mac. Do not delete this file to retry a failed create. After a server stops mid-create, an uncertain request is held instead of repeated: read/update its reported item ID, or search Things if no ID was saved. Request IDs are local to the Mac; they do not deduplicate calls made on another Mac.
+
 Things only updates the database while it runs, so the server opens Things hidden in the background when it starts. Right after that, reads can lag for the few seconds Things takes to sync. Settled 28 October 2026 by Nico. Rejected: leaving Things closed, with reads showing what it last synced.
 
 ## Configuration

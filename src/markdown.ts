@@ -11,7 +11,7 @@ export type MdTodo = {
   notes?: string;
   tags?: string[];
   dueDate?: string | null;
-  checklistItems?: MdChecklistItem[];
+  checklistItems?: MdChecklistItem[] | null;
 };
 
 export type MdProject = {

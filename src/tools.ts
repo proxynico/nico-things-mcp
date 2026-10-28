@@ -1,5 +1,7 @@
 import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { setTimeout as pause } from "node:timers/promises";
 import { z } from "zod";
+import { CreateRequests } from "./creates";
 import { type MdItem, type MdProject, renderArea, renderItem, renderList, renderProject } from "./markdown";
 import {
   deadlineSchema,
@@ -34,6 +36,7 @@ const DESTRUCTIVE = { ...WRITE, destructiveHint: true };
 
 const limitSchema = z.number().int().nonnegative().max(MAX_LIMIT).optional();
 const offsetSchema = z.number().int().nonnegative().optional().describe("Items to skip before returning results");
+const requestIdSchema = z.string().min(1).max(200).describe("Unique ID for this create (e.g. a UUID). Reuse the same ID and arguments on every retry; use a new ID only for a distinct item.");
 
 // JXA fallbacks for when SQLite is unavailable. Helpers such as todoOf live in the runtime prelude.
 const JXA_ITEM = `var item;
@@ -89,27 +92,27 @@ const JXA_KINDS = `return JSON.stringify(P.ids.map(function(id) {
   }
 }));`;
 
-const JXA_ADD_TODO = `var props = {name: P.title};
+const JXA_ADD_TODO = `var project = null;
+if (P.list) { project = app.projects.byName(P.list); project.id(); }
+var props = {name: P.title};
 if (P.notes) props.notes = P.notes;
 if (P.tags && P.tags.length && !P.tagsNeedJson) props.tagNames = P.tags.join(", ");
 if (P.deadline) props.dueDate = new Date(P.deadline + "T12:00:00");
 var todo = app.make({new: "toDo", withProperties: props});
 if (P.list) {
-  var project = app.projects.byName(P.list);
-  project.id();
   todo.project = project;
 }
 scheduleWhen(todo, P.when);
 return JSON.stringify({id: todo.id(), name: todo.name(), status: todo.status()});`;
 
-const JXA_ADD_PROJECT = `var props = {name: P.title};
+const JXA_ADD_PROJECT = `var area = null;
+if (P.area) { area = app.areas.byName(P.area); area.id(); }
+var props = {name: P.title};
 if (P.notes) props.notes = P.notes;
 if (P.tags && P.tags.length && !P.tagsNeedJson) props.tagNames = P.tags.join(", ");
 if (P.deadline) props.dueDate = new Date(P.deadline + "T12:00:00");
 var proj = app.make({new: "project", withProperties: props});
 if (P.area) {
-  var area = app.areas.byName(P.area);
-  area.id();
   proj.area = area;
 }
 (P.todos || []).forEach(function(title) {
@@ -243,16 +246,51 @@ function readAreaProjects(runtime: ThingsRuntime, area: string, options: Runtime
   );
 }
 
+const checklistSchema = z.array(z.object({ name: z.string(), done: z.boolean() }));
+
+// Keep fresh JXA fields: SQLite can lag a write. Use it only for the checklist JXA cannot read.
+async function withStoredChecklist({
+  runtime, item, expected, options,
+}: {
+  runtime: ThingsRuntime;
+  item: Item;
+  expected?: string[];
+  options: RuntimeCallOptions;
+}): Promise<Item> {
+  if (item.kind !== "todo" || typeof item.id !== "string") return item;
+  if (runtime.dbPath) {
+    const until = Date.now() + 2000;
+    do {
+      options.signal?.throwIfAborted();
+      try {
+        const stored = sql.readItem(runtime.dbPath, item.id);
+        const checklist = checklistSchema.safeParse(stored?.checklistItems);
+        if (checklist.success && (expected === undefined ||
+          (checklist.data.length === expected.length && checklist.data.every((entry, i) => entry.name === expected[i] && !entry.done)))) {
+          return { ...item, checklistItems: checklist.data };
+        }
+      } catch {
+        break; // The database is unavailable; do not turn an applied write into a failure.
+      }
+      if (expected === undefined || Date.now() >= until) break;
+      await pause(50, undefined, options);
+    } while (true);
+  }
+  return { ...item, checklistItems: null };
+}
+
 // Applies a JSON update to an item JXA just created or changed, then returns the item as Things now has it.
-async function patchAndReread(
-  runtime: ThingsRuntime,
-  kind: "todo" | "project",
-  id: string,
-  attributes: Record<string, unknown>,
-  options: RuntimeCallOptions,
-): Promise<string> {
+async function patchAndReread({ runtime, kind, id, attributes, options = {}, expectedChecklist }: {
+  runtime: ThingsRuntime;
+  kind: "todo" | "project";
+  id: string;
+  attributes: Record<string, unknown>;
+  options?: RuntimeCallOptions;
+  expectedChecklist?: string[];
+}): Promise<string> {
   await runtime.quietJson([jsonUpdate(kind, id, attributes)], options);
-  return JSON.stringify(await jxaRead<Item>(runtime, JXA_ITEM, { id }, options));
+  const item = await jxaRead<Item>(runtime, JXA_ITEM, { id }, options);
+  return JSON.stringify(await withStoredChecklist({ runtime, item, expected: expectedChecklist, options }));
 }
 
 async function doctorReport(runtime: ThingsRuntime, options: RuntimeCallOptions) {
@@ -276,7 +314,7 @@ async function doctorReport(runtime: ThingsRuntime, options: RuntimeCallOptions)
   let jxaRead: { ok: boolean; app_path: string; message: string };
   try {
     await runtime.jxa("return JSON.stringify(app.lists().map(function(list) { return list.name(); }));", undefined, options);
-    jxaRead = { ok: true, app_path: runtime.appPath, message: "JXA reads are available" };
+    jxaRead = { ok: true, app_path: runtime.appPath, message: "JXA reads are available; checklists require SQLite (null when unavailable)" };
   } catch (error) {
     jxaRead = {
       ok: false,
@@ -294,7 +332,7 @@ async function doctorReport(runtime: ThingsRuntime, options: RuntimeCallOptions)
   return { ok: sqlRead.ok || jxaRead.ok, checks: { sql_read: sqlRead, jxa_read: jxaRead, json_writes } };
 }
 
-export function registerTools(server: McpServer, runtime: ThingsRuntime): Record<string, RegisteredTool> {
+export function registerTools(server: McpServer, runtime: ThingsRuntime, requests = new CreateRequests()): Record<string, RegisteredTool> {
   const tools: Record<string, RegisteredTool> = {};
 
   tools.doctor = server.registerTool(
@@ -452,8 +490,9 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime): Record
   tools.add_todo = server.registerTool(
     "add_todo",
     {
-      description: "Create a todo in Things 3. Returns the created item with its ID.",
+      description: "Create a todo in Things 3. Reuse request_id and identical arguments after a timeout to get the original result without creating a duplicate.",
       inputSchema: {
+        request_id: requestIdSchema,
         title: z.string(),
         notes: z.string().optional(),
         when: whenSchema.optional().describe("today | tomorrow | evening | anytime | someday | yyyy-mm-dd"),
@@ -464,7 +503,7 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime): Record
       },
       annotations: WRITE,
     },
-    tool(async (params, options) => {
+    tool(async ({ request_id, ...params }, options) => {
       const tagsNeedJson = needsJsonTagWrite(params.tags);
       const attributes = jsonUpdateAttributes("todo", {
         when: usesJsonOnlyWhen(params.when) ? params.when : undefined,
@@ -473,17 +512,22 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime): Record
       });
       if (attributes) requireToken(runtime.token);
 
-      const created = await runtime.jxa(JXA_ADD_TODO, { ...params, tagsNeedJson }, options);
-      if (!attributes) return created;
-      return patchAndReread(runtime, "todo", (JSON.parse(created) as { id: string }).id, attributes, options);
+      return requests.run({ requestId: request_id, tool: "add_todo", params, signal: options.signal, create: async (recordId) => {
+        const created = await runtime.jxa(JXA_ADD_TODO, { ...params, tagsNeedJson });
+        const { id } = z.object({ id: z.string() }).parse(JSON.parse(created));
+        recordId(id);
+        if (!attributes) return created;
+        return patchAndReread({ runtime, kind: "todo", id, attributes, expectedChecklist: params.checklist_items });
+      } });
     }),
   );
 
   tools.add_project = server.registerTool(
     "add_project",
     {
-      description: "Create a project in Things 3 with optional child todos. Returns the created project with ID.",
+      description: "Create a project in Things 3 with optional child todos. Reuse request_id and identical arguments after a timeout to get the original result without creating a duplicate.",
       inputSchema: {
+        request_id: requestIdSchema,
         title: z.string(),
         notes: z.string().optional(),
         when: whenSchema.optional().describe("today | tomorrow | evening | anytime | someday | yyyy-mm-dd"),
@@ -494,7 +538,7 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime): Record
       },
       annotations: WRITE,
     },
-    tool(async (params, options) => {
+    tool(async ({ request_id, ...params }, options) => {
       const tagsNeedJson = needsJsonTagWrite(params.tags);
       const attributes = jsonUpdateAttributes("project", {
         when: usesJsonOnlyWhen(params.when) ? params.when : undefined,
@@ -502,9 +546,13 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime): Record
       });
       if (attributes) requireToken(runtime.token);
 
-      const created = await runtime.jxa(JXA_ADD_PROJECT, { ...params, tagsNeedJson }, options);
-      if (!attributes) return created;
-      return patchAndReread(runtime, "project", (JSON.parse(created) as { id: string }).id, attributes, options);
+      return requests.run({ requestId: request_id, tool: "add_project", params, signal: options.signal, create: async (recordId) => {
+        const created = await runtime.jxa(JXA_ADD_PROJECT, { ...params, tagsNeedJson });
+        const { id } = z.object({ id: z.string() }).parse(JSON.parse(created));
+        recordId(id);
+        if (!attributes) return created;
+        return patchAndReread({ runtime, kind: "project", id, attributes });
+      } });
     }),
   );
 
@@ -545,12 +593,13 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime): Record
       };
       if (clears || jsonUpdateAttributes("todo", patch)) requireToken(runtime.token);
 
-      const { kind, item } = JSON.parse(await runtime.jxa(JXA_UPDATE, { ...params, tagsNeedJson }, options)) as {
-        kind: "todo" | "project";
-        item: unknown;
-      };
+      const { kind, item } = z.object({
+        kind: z.enum(["todo", "project"]), item: z.record(z.string(), z.unknown()),
+      }).parse(JSON.parse(await runtime.jxa(JXA_UPDATE, { ...params, tagsNeedJson }, options)));
       const attributes = jsonUpdateAttributes(kind, patch);
-      if (!clears && !attributes) return JSON.stringify(normalizeThingsValue(item));
+      if (!clears && !attributes) {
+        return JSON.stringify(await withStoredChecklist({ runtime, item: normalizeThingsValue(item), options }));
+      }
 
       if (clears) {
         await runtime.quietUrl(kind === "project" ? "update-project" : "update", {
@@ -561,7 +610,8 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime): Record
         }, options);
       }
       if (attributes) await runtime.quietJson([jsonUpdate(kind, id, attributes)], options);
-      return JSON.stringify(await jxaRead<Item>(runtime, JXA_ITEM, { id }, options));
+      const updated = await jxaRead<Item>(runtime, JXA_ITEM, { id }, options);
+      return JSON.stringify(await withStoredChecklist({ runtime, item: updated, expected: params.checklist_items, options }));
     }),
   );
 

@@ -63,11 +63,8 @@ var todoOf = function(t) {
 };
 var withChecklist = function(t) {
   var r = todoOf(t);
-  try {
-    r.checklistItems = t.toDoChecklistItems().map(function(c) {
-      return {name: c.name(), done: c.status() === "completed"};
-    });
-  } catch(e) {}
+  // Things' scripting dictionary has no checklist access. Null means unavailable, not empty.
+  r.checklistItems = null;
   return r;
 };
 var projectOf = function(pr) {
