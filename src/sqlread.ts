@@ -105,7 +105,7 @@ function selectTasks(
   options: ReadOptions = {},
   checklists = false,
 ): Item[] {
-  const clauses = [NOT_TEMPLATE, ...where];
+  const clauses = [...where];
   const values = [...params];
   if (options.completed_after) {
     clauses.push("t.stopDate >= ?");
@@ -121,7 +121,7 @@ function selectTasks(
   return rows.map(toItem);
 }
 
-// A repeating todo's template row never shows in Things; its instances do.
+// A repeating todo's template shows in Upcoming, search, Trash, and its project, not in the other lists.
 const NOT_TEMPLATE = "t.rt1_recurrenceRule is null";
 const OPEN = [
   "t.type in (0, 1)",
@@ -144,31 +144,49 @@ function listQuery(list: ListName, today: number): { where: string[]; params: nu
   switch (list) {
     case "inbox":
       return {
-        where: [...OPEN, "t.start = 0", `coalesce(${IN_TODAY}, 0) = 0`],
+        where: [...OPEN, NOT_TEMPLATE, "t.start = 0", `coalesce(${IN_TODAY}, 0) = 0`],
         params: [today, today],
         orderBy: 't."index"',
       };
     case "today":
-      return { where: [...OPEN, IN_TODAY], params: [today, today], orderBy: "t.startBucket, t.todayIndex, t.creationDate" };
+      return {
+        where: [...OPEN, NOT_TEMPLATE, IN_TODAY],
+        params: [today, today],
+        orderBy: "t.startBucket, t.todayIndex, t.creationDate",
+      };
     // Todos only: Things lists a project's todos here, not the project.
     case "anytime":
       return {
-        where: [...OPEN, "t.type = 0", `(t.start = 1 or ${IN_TODAY})`, "(p.uuid is null or p.start = 1 or p.startDate <= ?)"],
+        where: [
+          ...OPEN,
+          NOT_TEMPLATE,
+          "t.type = 0",
+          `(t.start = 1 or ${IN_TODAY})`,
+          "(p.uuid is null or p.start = 1 or p.startDate <= ?)",
+        ],
         params: [today, today, today],
         orderBy: BY_AREA,
       };
-    // Scheduled items on their start date, and unscheduled ones outside Inbox on their deadline.
+    // Scheduled items on their start date and unscheduled ones outside Inbox on their deadline.
+    // Repeating templates follow on their next date, or last when they repeat after completion.
     case "upcoming":
       return {
-        where: [...OPEN, "((t.start = 2 and t.startDate > ?) or (t.start in (1, 2) and t.startDate is null and t.deadline > ?))"],
+        where: [
+          ...OPEN,
+          `(t.rt1_recurrenceRule is not null
+            or (t.start = 2 and t.startDate > ?)
+            or (t.start in (1, 2) and t.startDate is null and t.deadline > ?))`,
+        ],
         params: [today, today],
-        orderBy: "coalesce(t.startDate, t.deadline), t.todayIndex, t.creationDate",
+        orderBy: `case when t.rt1_recurrenceRule is null then coalesce(t.startDate, t.deadline)
+          else coalesce(t.rt1_nextInstanceStartDate, ${Number.MAX_SAFE_INTEGER}) end, t.todayIndex, t.creationDate`,
       };
+    // Someday todos inside a project show only within that project.
     case "someday":
       return {
-        where: [...OPEN, "t.start = 2", "t.startDate is null"],
+        where: [...OPEN, NOT_TEMPLATE, "t.start = 2", "t.startDate is null", "p.uuid is null"],
         params: [],
-        orderBy: 'coalesce(a."index", pa."index"), t.type desc, p."index", h."index", t."index"',
+        orderBy: 'a."index", t.type desc, t."index"',
       };
     // A logged or trashed project shows as one row; its todos stay inside it.
     case "logbook":
@@ -317,7 +335,7 @@ export function stats(dbPath: string, window: StatsWindow): StatsResult {
 
     const countList = (list: ListName): number => {
       const { where, params } = listQuery(list, today);
-      const sql = `select count(*) as n ${FROM} where ${[NOT_TEMPLATE, ...where].join(" and ")}`;
+      const sql = `select count(*) as n ${FROM} where ${where.join(" and ")}`;
       return (db.query(sql).get(...params) as { n: number }).n;
     };
     const { n: overdue } = db

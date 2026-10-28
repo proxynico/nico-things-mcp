@@ -37,6 +37,7 @@ type Task = {
   area?: string | null;
   heading?: string | null;
   rt1_recurrenceRule?: string | null;
+  rt1_nextInstanceStartDate?: number | null;
 };
 
 // Things' start column: 0 Inbox, 1 Anytime, 2 Someday or scheduled.
@@ -61,8 +62,16 @@ export const TASKS: Task[] = [
   { uuid: "t-ph", title: "Under heading", heading: "head-1", index: 0 },
   { uuid: "t-later", title: "In someday project", project: "proj-3" },
   { uuid: "t-started", title: "In started project", project: "proj-4" },
+  { uuid: "t-someday-in-proj", title: "Someday inside a project", start: 2, project: "proj-4", index: 1 },
   { uuid: "t-dropped", title: "Under trashed heading", heading: "head-2" },
   { uuid: "t-template", title: "Repeating template", start: 2, rt1_recurrenceRule: "rule" },
+  {
+    uuid: "t-template-weekly",
+    title: "Weekly template",
+    start: 2,
+    rt1_recurrenceRule: "rule",
+    rt1_nextInstanceStartDate: packDay(10),
+  },
   { uuid: "t-search", title: "Find me report", area: "area-2", userModificationDate: 70 },
   { uuid: "t-future", title: "Future deadline", area: "area-2", deadline: packDay(400) },
   { uuid: "t-log-done", title: "Logged done", status: 3, stopDate: STOP_DONE, project: "proj-1" },
@@ -78,7 +87,8 @@ export function createFixtureDb(path: string): void {
     uuid text, type integer, status integer, trashed integer, title text, notes text,
     start integer, startDate integer, startBucket integer, deadline integer, deadlineSuppressionDate integer,
     stopDate real, creationDate real, userModificationDate real, todayIndex integer, "index" integer,
-    openUntrashedLeafActionsCount integer, project text, area text, heading text, rt1_recurrenceRule blob
+    openUntrashedLeafActionsCount integer, project text, area text, heading text, rt1_recurrenceRule blob,
+    rt1_nextInstanceStartDate integer
   )`);
   db.run(`create table TMArea (uuid text, title text, "index" integer)`);
   db.run(`create table TMTag (uuid text, title text, "index" integer)`);
@@ -92,15 +102,16 @@ export function createFixtureDb(path: string): void {
 
   const insert = db.prepare(`insert into TMTask
     (uuid, type, status, trashed, title, notes, start, startDate, startBucket, deadline, stopDate, creationDate,
-     userModificationDate, todayIndex, "index", openUntrashedLeafActionsCount, project, area, heading, rt1_recurrenceRule)
-    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+     userModificationDate, todayIndex, "index", openUntrashedLeafActionsCount, project, area, heading, rt1_recurrenceRule,
+     rt1_nextInstanceStartDate)
+    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   for (const task of TASKS) {
     insert.run(
       task.uuid, task.type ?? 0, task.status ?? 0, task.trashed ?? 0, task.title, task.notes ?? null,
       task.start ?? 1, task.startDate ?? null, task.startBucket ?? 0, task.deadline ?? null, task.stopDate ?? null,
       task.creationDate ?? null, task.userModificationDate ?? 0, task.todayIndex ?? 0, task.index ?? 0,
       task.openUntrashedLeafActionsCount ?? null, task.project ?? null, task.area ?? null, task.heading ?? null,
-      task.rt1_recurrenceRule ?? null,
+      task.rt1_recurrenceRule ?? null, task.rt1_nextInstanceStartDate ?? null,
     );
   }
   db.close(false);

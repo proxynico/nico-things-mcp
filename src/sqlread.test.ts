@@ -53,8 +53,17 @@ describe("readList", () => {
     expect(items).not.toContain("t-template");
   });
 
-  test("upcoming holds future start dates and unscheduled future deadlines; someday holds undated start=2 items", () => {
-    expect(ids(sql.readList(dbPath, "upcoming"))).toEqual(["t-upcoming", "proj-1", "t-future"]);
+  test("upcoming holds future start dates, unscheduled future deadlines, then repeating templates", () => {
+    expect(ids(sql.readList(dbPath, "upcoming"))).toEqual([
+      "t-upcoming",
+      "t-template-weekly",
+      "proj-1",
+      "t-future",
+      "t-template",
+    ]);
+  });
+
+  test("someday holds undated start=2 items outside projects", () => {
     expect(ids(sql.readList(dbPath, "someday"))).toEqual(["t-someday", "proj-3"]);
   });
 
@@ -168,13 +177,13 @@ describe("search", () => {
     expect(ids(sql.search(dbPath, { query: "REPORT" }))).toEqual(["t-search"]);
     expect(ids(sql.search(dbPath, { tag: "urgent" }))).toEqual(["t-search", "t-pa"]);
     expect(ids(sql.search(dbPath, { query: "proj", tag: "urgent" }))).toEqual(["t-pa"]);
+    expect(ids(sql.search(dbPath, { query: "template" })).sort()).toEqual(["t-template", "t-template-weekly"]);
   });
 
   test("skips completed and trashed items and treats LIKE wildcards literally", () => {
     expect(sql.search(dbPath, { query: "Logged" })).toEqual([]);
     expect(sql.search(dbPath, { query: "Trashed" })).toEqual([]);
     expect(sql.search(dbPath, { query: "%" })).toEqual([]);
-    expect(sql.search(dbPath, { query: "template" })).toEqual([]);
   });
 
   test("pages results", () => {
