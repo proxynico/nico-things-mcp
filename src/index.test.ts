@@ -151,7 +151,8 @@ describe("runtime", () => {
 
     await runtime.quietUrl("show", { query: "Today & Next", id: "abc/123", skipped: undefined });
     expect(calls[0]?.[3]).toContain("things:///show?query=Today%20%26%20Next&id=abc%2F123\"");
-    expect(calls[0]?.[3]).toContain("c.activates = false;");
+    expect(calls[0]?.[3]).toContain("$.NSWorkspaceLaunchWithoutActivation");
+    expect(calls[0]?.[3]).not.toContain("CompletionHandler");
   });
 
   test("quietJson sends the auth token only for updates", async () => {
