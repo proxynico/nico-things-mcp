@@ -34,6 +34,16 @@ A local [MCP](https://modelcontextprotocol.io/) server that lets Claude Code, Co
 - "What did I finish this week?"
 - "Export my Work area as Markdown."
 
+## Routines
+
+Three ready-made routines show up as slash commands in Claude Code, such as `/mcp__things__plan_my_day`, and as prompts in other MCP apps that support them. Each one reads first, then proposes changes and waits for your OK before touching Things.
+
+| Routine | What it does |
+| --- | --- |
+| `plan_my_day` | Lays out Today with overdue to-dos first, and suggests an order and what to move off |
+| `weekly_review` | Sums up the last seven days, then flags loose ends, stalled projects, and the week ahead |
+| `clear_inbox` | Suggests a project or area, a date, and tags for each Inbox item, then files them |
+
 ## Install
 
 You need macOS, Things 3, and [Bun](https://bun.sh/) 1.3 or newer.
