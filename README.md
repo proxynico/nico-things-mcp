@@ -17,14 +17,14 @@
   <img src="assets/readme-demo.png" width="720" alt="Asking an assistant to move everything left on Today to tomorrow except the invoice; it reads Today in 2 ms and moves three to-dos.">
 </p>
 
-A local [MCP](https://modelcontextprotocol.io/) server that lets Claude Code, Codex, Claude Desktop, or any other MCP app read and organise your Things 3 to-dos. Everything stays on your Mac.
+A local [MCP](https://modelcontextprotocol.io/) server that lets Claude Code, Codex, Claude Desktop, or any other MCP app read and organise your Things 3 to-dos. It runs on your Mac and talks to Things directly, with no cloud service of its own. The to-dos it reads go to whichever AI model your assistant uses.
 
 ## Why this one
 
 - **No duplicate to-dos.** AI apps resend a request when it times out. Each create carries an ID, so a resend gets back the to-do already made instead of adding a second one.
 - **Things stays out of your way.** Things runs hidden and every change happens in the background, so its window never jumps in front of you.
 - **Fast.** Reads come straight from Things' database on your Mac. A 942-item Logbook reads in 5 ms; the same read through AppleScript took 2 minutes 21 seconds.
-- **It doesn't guess.** Creates and single updates reply with the item as Things now has it. When something can't be seen, such as a checklist without database access, it says unknown instead of empty.
+- **It doesn't guess.** Creates and single updates reply with what Things saved, read back from Things. When something can't be seen, such as a checklist without database access, it says unknown instead of empty.
 
 ## Try asking
 
@@ -61,7 +61,7 @@ Then ask your assistant to run `doctor`. If macOS asks whether your terminal or 
 
 ### Auth token
 
-Reads and most changes need no setup. Scheduling for Evening, Anytime, or Someday, clearing a date, setting checklists, and `bulk_update` use Things' URL commands, which need its auth token. Find it in Things under Settings → General → Enable Things URLs → Manage, and give it to the server as `THINGS_AUTH_TOKEN` through your MCP app's settings. For Claude Code, add `-e THINGS_AUTH_TOKEN=<token>` just before the `--` in the command above. Keep it out of any repository.
+Reads and most changes need no setup. Scheduling for Evening, Anytime, or Someday, clearing a date, setting checklists, tags that contain commas, and `bulk_update` use Things' URL commands, which need its auth token. Find it in Things under Settings → General → Enable Things URLs → Manage, and give it to the server as `THINGS_AUTH_TOKEN` through your MCP app's settings. For Claude Code, add `-e THINGS_AUTH_TOKEN=<token>` just before the `--` in the command above. Keep it out of any repository.
 
 ## Tools
 
@@ -81,7 +81,7 @@ Reads and most changes need no setup. Scheduling for Evening, Anytime, or Someda
 
 **Reads** come from Things' SQLite database, opened read-only. If it can't be read, they fall back to asking Things over JXA (JavaScript for Automation). `stats` needs the database. So do checklists, which Things' scripting interface can't read: without the database, items return `checklistItems: null` rather than an empty list.
 
-**Writes** go through Things itself, using JXA and, for what JXA can't do, Things' URL commands. Each write then rereads the item, waiting up to two seconds for a changed checklist to reach the database.
+**Writes** go through Things itself, using JXA and, for what JXA can't do, Things' URL commands. `update` replies with the item reread from Things, waiting up to two seconds for a changed checklist to reach the database. Creates reply with the new item's ID, name, and status, or the full reread item when they also set something only the URL commands can, such as a checklist. `bulk_update`, `delete`, and `empty_trash` reply with a short confirmation.
 
 **Things stays running.** It only updates its database while it runs, so the server opens Things hidden when it starts. Right after that, reads can lag for the few seconds Things takes to sync.
 
