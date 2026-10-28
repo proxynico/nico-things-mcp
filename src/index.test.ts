@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFixtureDb } from "./fixture";
+import { CreateRequests } from "./creates";
 import { createServer } from "./index";
 import { renderArea, renderList, renderProject, renderTodo, type MdProject, type MdTodo } from "./markdown";
 import { createRuntime } from "./runtime";
@@ -62,7 +64,7 @@ function createMockApp({
     },
   };
 
-  const { tools } = createServer(runtime);
+  const { tools } = createServer(runtime, new CreateRequests({ path: join(dir, `${randomUUID()}.sqlite`) }));
   return { tools, jxaCalls, quietCalls, quietJsonCalls };
 }
 
@@ -101,6 +103,17 @@ describe("runtime", () => {
     });
     expect(errmsg(error)).toBe("Missing permission");
     expect(errmsg("plain")).toBe("plain");
+  });
+
+  test("errmsg never returns a subprocess command when stderr is empty", () => {
+    for (const stderr of ["", " \n"]) {
+      const error = Object.assign(new Error("Command failed: osascript private-test-argument"), {
+        cmd: "osascript private-test-argument", stderr, signal: "SIGKILL",
+      });
+      expect(errmsg(error)).not.toContain("private-test-argument");
+      expect(errmsg(error)).not.toContain("things://");
+      expect(errmsg(error)).not.toContain("osascript");
+    }
   });
 
   test("stats day windows use local calendar boundaries", () => {
@@ -380,10 +393,11 @@ describe("search", () => {
 describe("add_todo", () => {
   test("exposes strict date validation", () => {
     const { tools } = createMockApp();
-    expect(() => parseToolInput(tools.add_todo, { title: "x", when: "later" })).toThrow();
-    expect(() => parseToolInput(tools.add_todo, { title: "x", deadline: "2026-4-1" })).toThrow();
-    expect(() => parseToolInput(tools.add_todo, { title: "x", deadline: "2026-99-99" })).toThrow();
-    expect(() => parseToolInput(tools.add_todo, { title: "x", when: "2026-04-01" })).not.toThrow();
+    expect(() => parseToolInput(tools.add_todo, { title: "x" })).toThrow();
+    expect(() => parseToolInput(tools.add_todo, { request_id: randomUUID(), title: "x", when: "later" })).toThrow();
+    expect(() => parseToolInput(tools.add_todo, { request_id: randomUUID(), title: "x", deadline: "2026-4-1" })).toThrow();
+    expect(() => parseToolInput(tools.add_todo, { request_id: randomUUID(), title: "x", deadline: "2026-99-99" })).toThrow();
+    expect(() => parseToolInput(tools.add_todo, { request_id: randomUUID(), title: "x", when: "2026-04-01" })).not.toThrow();
   });
 
   test("creates a todo with JXA alone when no JSON-only fields are used", async () => {
@@ -392,7 +406,7 @@ describe("add_todo", () => {
       jxa: async () => '{"id":"todo-1","name":"Draft","status":"open"}',
     });
 
-    const result = await callTool(tools.add_todo, { title: "Draft", list: "Roadmap", checklist_items: [] });
+    const result = await callTool(tools.add_todo, { request_id: randomUUID(), title: "Draft", list: "Roadmap", checklist_items: [] });
     expect(textOf(result)).toBe('{"id":"todo-1","name":"Draft","status":"open"}');
     expect(jxaCalls[0]?.body).toContain("project.id();");
     expect(quietCalls).toHaveLength(0);
@@ -402,7 +416,7 @@ describe("add_todo", () => {
   test("requires auth before creating anything that needs a JSON patch", async () => {
     const { tools, jxaCalls } = createMockApp({ token: "" });
     for (const args of [{ tags: ["ops,urgent"] }, { when: "evening" }, { checklist_items: ["A"] }]) {
-      const result = await callTool(tools.add_todo, { title: "Draft", ...args });
+      const result = await callTool(tools.add_todo, { request_id: randomUUID(), title: "Draft", ...args });
       expect(isError(result)).toBeTrue();
       expect(textOf(result)).toBe("THINGS_AUTH_TOKEN is required for this operation");
     }
@@ -417,7 +431,7 @@ describe("add_todo", () => {
       ),
     });
 
-    const result = await callTool(tools.add_todo, { title: "Draft", when: "someday", checklist_items: ["A"] });
+    const result = await callTool(tools.add_todo, { request_id: randomUUID(), title: "Draft", when: "someday", checklist_items: ["A"] });
     expect(textOf(result)).toContain('"checklistItems"');
     expect(quietJsonCalls).toEqual([
       [
@@ -443,9 +457,9 @@ describe("add_project", () => {
       jxa: async () => '{"id":"proj-1","name":"Launch","status":"open"}',
     });
 
-    await callTool(tools.add_project, { title: "Launch", area: "Work", todos: ["Ship it"] });
+    await callTool(tools.add_project, { request_id: randomUUID(), title: "Launch", area: "Work", todos: ["Ship it"] });
     expect(jxaCalls[0]?.body).toContain("area.id();");
-    expect(jxaCalls[0]?.body).toContain("t.project = proj;");
+    expect(jxaCalls[1]?.body).toContain("t.project = proj;");
   });
 
   test("patches special when through JSON and re-reads", async () => {
@@ -453,7 +467,7 @@ describe("add_project", () => {
       jxa: sequence('{"id":"proj-1","name":"Launch","status":"open"}', '{"id":"proj-1","todos":[]}'),
     });
 
-    const result = await callTool(tools.add_project, { title: "Launch", when: "evening" });
+    const result = await callTool(tools.add_project, { request_id: randomUUID(), title: "Launch", when: "evening" });
     expect(textOf(result)).toContain('"todos"');
     expect(quietJsonCalls).toEqual([
       [{ type: "project", operation: "update", id: "proj-1", attributes: { when: "evening" } }],
@@ -467,13 +481,46 @@ describe("add_project", () => {
       },
     });
 
-    const result = await callTool(tools.add_project, { title: "Launch" });
+    const result = await callTool(tools.add_project, { request_id: randomUUID(), title: "Launch" });
     expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("project failed");
+    expect(textOf(result)).toContain("Create outcome is uncertain: project failed");
   });
 });
 
 describe("update", () => {
+  test("waits for a checklist replacement without returning stale SQLite fields", async () => {
+    const lagPath = join(dir, "lag.sqlite");
+    createFixtureDb(lagPath);
+    const { tools } = createMockApp({
+      dbPath: lagPath,
+      jxa: sequence('{"kind":"todo","item":{"id":"t-pa"}}', '{"kind":"todo","id":"t-pa","name":"Fresh title"}'),
+    });
+    const flush = setTimeout(() => {
+      const db = new Database(lagPath);
+      db.run("delete from TMChecklistItem where task = 't-pa'");
+      db.run("insert into TMChecklistItem values ('new', 't-pa', 'Replacement', 0, 0)");
+      db.close();
+    }, 100);
+    try {
+      const result = await callTool(tools.update, { id: "t-pa", checklist_items: ["Replacement"] });
+      expect(jsonOf(result)).toMatchObject({ name: "Fresh title", checklistItems: [{ name: "Replacement", done: false }] });
+    } finally {
+      clearTimeout(flush);
+    }
+  });
+
+  test("keeps fresh JXA fields and adds the stored checklist to a write reply", async () => {
+    const { tools } = createMockApp({
+      dbPath,
+      jxa: () => '{"kind":"todo","item":{"kind":"todo","id":"t-pa","name":"Fresh title"}}',
+    });
+    const result = await callTool(tools.update, { id: "t-pa", title: "Fresh title" });
+    expect(jsonOf(result)).toMatchObject({
+      name: "Fresh title",
+      checklistItems: [{ name: "Step one", done: true }, { name: "Step two", done: false }],
+    });
+  });
+
   test("rejects an id-only update or an empty title before invoking Things", async () => {
     const { tools, jxaCalls } = createMockApp();
     const idOnly = await callTool(tools.update, { id: "1" });

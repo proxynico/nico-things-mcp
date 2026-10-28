@@ -67,12 +67,14 @@ export const updateDeadlineSchema = dateOr([""], "Use yyyy-mm-dd or empty string
 
 export const errmsg = (error: unknown): string => {
   if (!(error instanceof Error)) return String(error);
-  const stderr = (error as Error & { stderr?: string }).stderr?.trim();
+  const stderr = "stderr" in error && typeof error.stderr === "string" ? error.stderr.trim() : "";
   if (stderr) {
     return stderr
       .replace(/^execution error: /, "")
       .replace(/ \(-?\d+\)$/, "");
   }
+  // execFile's message includes argv, which can contain authenticated Things URLs.
+  if ("cmd" in error) return "Things automation process failed without an error message";
   return error.message;
 };
 
