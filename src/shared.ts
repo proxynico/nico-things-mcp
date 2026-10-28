@@ -93,9 +93,18 @@ export function isoDayToUnixEnd(value: string): number {
   return Math.floor(new Date(year, month - 1, day, 23, 59, 59).getTime() / 1000);
 }
 
+function localIsoDay(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
 export function todayIso(): string {
-  const today = new Date();
-  return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  return localIsoDay(new Date());
+}
+
+// The local calendar day `days` after (or before, when negative) a yyyy-mm-dd day.
+export function shiftIsoDay(value: string, days: number): string {
+  const [year, month, day] = parseIsoDay(value);
+  return localIsoDay(new Date(year, month - 1, day + days));
 }
 
 // Things packs calendar dates (deadline, startDate) as integers:
