@@ -98,11 +98,9 @@ export async function openThingsHidden(execFn: ExecFn = exec): Promise<void> {
     "-e",
     `ObjC.import("AppKit");
 if (!Application(${JSON.stringify(THINGS_APP_PATH)}).running()) {
-  var c = $.NSWorkspaceOpenConfiguration.configuration;
-  c.activates = false;
-  c.hides = true;
-  $.NSWorkspace.sharedWorkspace.openApplicationAtURLConfigurationCompletionHandler($.NSURL.fileURLWithPath(${JSON.stringify(THINGS_APP_PATH)}), c, null);
-  delay(0.5);
+  $.NSWorkspace.sharedWorkspace.launchApplicationAtURLOptionsConfigurationError(
+    $.NSURL.fileURLWithPath(${JSON.stringify(THINGS_APP_PATH)}),
+    $.NSWorkspaceLaunchWithoutActivation | $.NSWorkspaceLaunchAndHide, $.NSDictionary.dictionary, null);
 }`,
   ]);
 }
@@ -138,15 +136,16 @@ ${body}
         .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
         .join("&");
       const url = `things:///${path}${qs ? "?" + qs : ""}`;
+      // NSWorkspace's newer open call runs its completion handler on a background thread mid-script,
+      // which sometimes failed the script after Things had applied the URL. This older call has none.
       await execFn("osascript", [
         "-l",
         "JavaScript",
         "-e",
         `ObjC.import("AppKit");
 var u = $.NSURL.URLWithString(${JSON.stringify(url)});
-var c = $.NSWorkspaceOpenConfiguration.configuration;
-c.activates = false;
-$.NSWorkspace.sharedWorkspace.openURLConfigurationCompletionHandler(u, c, null);
+var opened = $.NSWorkspace.sharedWorkspace.openURLOptionsConfigurationError(u, $.NSWorkspaceLaunchWithoutActivation, $.NSDictionary.dictionary, null);
+if (opened.isNil()) throw new Error("Things did not open the ${path} URL");
 delay(0.5);`,
       ], options);
     },
