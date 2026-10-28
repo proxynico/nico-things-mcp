@@ -144,11 +144,7 @@ function renderProjectShallow(project: MdProject): string {
   return parts.join("\n\n");
 }
 
-export function renderArea(
-  areaName: string,
-  projects: MdProject[],
-  _opts: MdRenderOptions = DEFAULT_OPTS,
-): string {
+export function renderArea(areaName: string, projects: MdProject[]): string {
   if (!projects.length) {
     return `# ${areaName}\n\n*(no projects)*\n`;
   }
