@@ -43,7 +43,9 @@ No credential is required for normal JXA reads and writes. Some authenticated JS
 - `delete`, `empty_trash`: destructive actions with MCP metadata and explicit trash confirmation
 - `show`: open an item or search in Things without activating the app
 
-Reads come straight from Things' local SQLite database, so Things can stay closed. If the database can't be read, they fall back to asking Things over JXA. The database only changes while Things runs, so with Things closed, reads show what it last synced. `stats` needs the database.
+Reads come straight from Things' local SQLite database. If the database can't be read, they fall back to asking Things over JXA. `stats` needs the database.
+
+Things only updates the database while it runs, so the server opens Things hidden in the background when it starts. Right after that, reads can lag for the few seconds Things takes to sync. Settled 28 October 2026 by Nico. Rejected: leaving Things closed, with reads showing what it last synced.
 
 ## Configuration
 

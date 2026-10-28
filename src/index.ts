@@ -5,7 +5,7 @@
 import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import pkg from "../package.json";
-import { createRuntime } from "./runtime";
+import { createRuntime, openThingsHidden } from "./runtime";
 import type { ThingsRuntime } from "./shared";
 import { registerTools } from "./tools";
 
@@ -18,5 +18,7 @@ export function createServer(runtime: ThingsRuntime = createRuntime()): {
 }
 
 if (import.meta.main) {
-  await createServer().server.connect(new StdioServerTransport());
+  const runtime = createRuntime();
+  if (runtime.dbPath) openThingsHidden().catch(() => {});
+  await createServer(runtime).server.connect(new StdioServerTransport());
 }

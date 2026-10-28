@@ -90,6 +90,23 @@ var scheduleWhen = function(obj, w) {
   }
 };`;
 
+// Things only updates its database while it runs, so SQLite reads keep it open, hidden.
+export async function openThingsHidden(execFn: ExecFn = exec): Promise<void> {
+  await execFn("osascript", [
+    "-l",
+    "JavaScript",
+    "-e",
+    `ObjC.import("AppKit");
+if (!Application(${JSON.stringify(THINGS_APP_PATH)}).running()) {
+  var c = $.NSWorkspaceOpenConfiguration.configuration;
+  c.activates = false;
+  c.hides = true;
+  $.NSWorkspace.sharedWorkspace.openApplicationAtURLConfigurationCompletionHandler($.NSURL.fileURLWithPath(${JSON.stringify(THINGS_APP_PATH)}), c, null);
+  delay(0.5);
+}`,
+  ]);
+}
+
 export function createRuntime({
   execFn = exec,
   token = process.env.THINGS_AUTH_TOKEN ?? "",
