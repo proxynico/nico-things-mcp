@@ -48,6 +48,7 @@ export const TASKS: Task[] = [
   { uuid: "head-1", title: "Phase two", type: 2, project: "proj-1" },
   { uuid: "head-2", title: "Dropped phase", type: 2, project: "proj-1", trashed: 1, index: 1 },
   { uuid: "t-inbox", title: "Inbox item", start: 0, index: 5, creationDate: CREATED },
+  { uuid: "t-inbox-due", title: "Inbox item past its deadline", start: 0, deadline: packDay(-1), todayIndex: 35 },
   { uuid: "t-today-a", title: "Today A", area: "area-2", startDate: packDay(0), todayIndex: 10, creationDate: CREATED },
   { uuid: "t-today-b", title: "Today B", area: "area-2", startDate: packDay(-2), todayIndex: 5 },
   { uuid: "t-evening", title: "Evening", area: "area-2", startDate: packDay(0), startBucket: 1 },

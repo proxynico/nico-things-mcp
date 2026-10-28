@@ -20,7 +20,7 @@ function isoDay(offsetDays: number): string {
 }
 
 describe("readList", () => {
-  test("inbox holds only start=0 items", () => {
+  test("inbox holds start=0 items until their deadline arrives", () => {
     expect(ids(sql.readList(dbPath, "inbox"))).toEqual(["t-inbox"]);
   });
 
@@ -31,15 +31,20 @@ describe("readList", () => {
       "t-unconfirmed",
       "proj-4",
       "t-overdue",
+      "t-inbox-due",
       "t-evening",
     ]);
   });
 
-  test("anytime includes today's items and project todos but not someday projects", () => {
+  test("anytime holds todos only, today's included, heading todos after loose ones", () => {
     const items = ids(sql.readList(dbPath, "anytime"));
-    expect(items.slice(0, 6)).toEqual(["proj-4", "t-started", "proj-1", "t-ph", "t-pa", "t-pb"]);
+    expect(items.slice(0, 5)).toEqual(["t-inbox-due", "t-started", "t-pa", "t-pb", "t-ph"]);
     expect(items).toContain("t-unconfirmed");
+    expect(items).toContain("t-inbox-due");
+    expect(items).toContain("t-future");
     expect(items).toContain("t-search");
+    expect(items).not.toContain("proj-1");
+    expect(items).not.toContain("proj-4");
     expect(items).not.toContain("t-inbox");
     expect(items).not.toContain("t-upcoming");
     expect(items).not.toContain("t-later");
@@ -48,8 +53,8 @@ describe("readList", () => {
     expect(items).not.toContain("t-template");
   });
 
-  test("upcoming holds future start dates; someday holds undated start=2 items", () => {
-    expect(ids(sql.readList(dbPath, "upcoming"))).toEqual(["t-upcoming"]);
+  test("upcoming holds future start dates and unscheduled future deadlines; someday holds undated start=2 items", () => {
+    expect(ids(sql.readList(dbPath, "upcoming"))).toEqual(["t-upcoming", "proj-1", "t-future"]);
     expect(ids(sql.readList(dbPath, "someday"))).toEqual(["t-someday", "proj-3"]);
   });
 
@@ -187,9 +192,9 @@ describe("stats", () => {
       completed: 3,
       canceled: 1,
       created: 2,
-      overdue: 1,
+      overdue: 2,
       inbox: 1,
-      today: 6,
+      today: 7,
     });
   });
 

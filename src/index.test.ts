@@ -207,6 +207,7 @@ describe("read", () => {
       "t-unconfirmed",
       "proj-4",
       "t-overdue",
+      "t-inbox-due",
       "t-evening",
     ]);
     expect(ids(await callTool(tools.read, { list: "logbook", limit: 1, offset: 1 }))).toEqual(["proj-2"]);
@@ -1043,7 +1044,7 @@ describe("stats", () => {
     const { tools } = createMockApp({ dbPath });
     const result = jsonOf(await callTool(tools.stats, {})) as { window: { since: string; until: string }; today: number };
     expect(result.window.since).toBe(result.window.until);
-    expect(result.today).toBe(6);
+    expect(result.today).toBe(7);
   });
 
   test("defaults since to until and passes an explicit window through", async () => {

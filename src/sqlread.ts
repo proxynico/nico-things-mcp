@@ -130,7 +130,12 @@ const OPEN = [
   "coalesce(h.trashed, 0) = 0",
   "coalesce(p.trashed, 0) = 0",
 ];
-const BY_AREA = 'coalesce(a."index", pa."index"), p."index", t."index"';
+// Areas in order, loose todos before projects, and todos above a project's first heading first.
+const BY_AREA = 'coalesce(a."index", pa."index"), p."index", h."index", t."index"';
+// An item is in Today once its start date arrives, or once its deadline does unless it was moved out since.
+// Takes today twice.
+const IN_TODAY = `((t.start in (1, 2) and t.startDate <= ?)
+  or (t.startDate is null and t.deadline <= ? and t.deadlineSuppressionDate is null))`;
 
 // The start column is 0 for Inbox, 1 for Anytime, and 2 for Someday or a scheduled startDate.
 // Things moves scheduled items to Anytime only while it runs, so a due startDate counts either way.
@@ -138,31 +143,33 @@ const BY_AREA = 'coalesce(a."index", pa."index"), p."index", t."index"';
 function listQuery(list: ListName, today: number): { where: string[]; params: number[]; orderBy: string } {
   switch (list) {
     case "inbox":
-      return { where: [...OPEN, "t.start = 0"], params: [], orderBy: 't."index"' };
-    case "today":
       return {
-        where: [
-          ...OPEN,
-          `((t.start in (1, 2) and t.startDate <= ?)
-            or (t.startDate is null and t.deadline <= ? and t.deadlineSuppressionDate is null))`,
-        ],
+        where: [...OPEN, "t.start = 0", `coalesce(${IN_TODAY}, 0) = 0`],
         params: [today, today],
-        orderBy: 't.startBucket, t.todayIndex, t."index"',
+        orderBy: 't."index"',
       };
+    case "today":
+      return { where: [...OPEN, IN_TODAY], params: [today, today], orderBy: "t.startBucket, t.todayIndex, t.creationDate" };
+    // Todos only: Things lists a project's todos here, not the project.
     case "anytime":
       return {
-        where: [
-          ...OPEN,
-          "(t.start = 1 or (t.start = 2 and t.startDate <= ?))",
-          "(p.uuid is null or p.start = 1 or p.startDate <= ?)",
-        ],
-        params: [today, today],
+        where: [...OPEN, "t.type = 0", `(t.start = 1 or ${IN_TODAY})`, "(p.uuid is null or p.start = 1 or p.startDate <= ?)"],
+        params: [today, today, today],
         orderBy: BY_AREA,
       };
+    // Scheduled items on their start date, and unscheduled ones outside Inbox on their deadline.
     case "upcoming":
-      return { where: [...OPEN, "t.start = 2", "t.startDate > ?"], params: [today], orderBy: 't.startDate, t."index"' };
+      return {
+        where: [...OPEN, "((t.start = 2 and t.startDate > ?) or (t.start in (1, 2) and t.startDate is null and t.deadline > ?))"],
+        params: [today, today],
+        orderBy: "coalesce(t.startDate, t.deadline), t.todayIndex, t.creationDate",
+      };
     case "someday":
-      return { where: [...OPEN, "t.start = 2", "t.startDate is null"], params: [], orderBy: BY_AREA };
+      return {
+        where: [...OPEN, "t.start = 2", "t.startDate is null"],
+        params: [],
+        orderBy: 'coalesce(a."index", pa."index"), t.type desc, p."index", h."index", t."index"',
+      };
     // A logged or trashed project shows as one row; its todos stay inside it.
     case "logbook":
       return {
