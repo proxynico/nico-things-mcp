@@ -4,143 +4,84 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  createRuntime,
-  createServer,
-  errmsg,
-  isSandboxAutomationError,
-  LIST_NAMES,
-  normalizeThingsJson,
-  type RuntimeInspection,
-  type StatsResult,
-  type StatsWindow,
-  type ThingsRuntime,
-  verifyThingsAccess,
-} from "./index";
-import {
-  renderArea,
-  renderList,
-  renderProject,
-  renderTodo,
-  type MdProject,
-  type MdTodo,
-} from "./markdown";
+import { createFixtureDb } from "./fixture";
+import { createServer } from "./index";
+import { renderArea, renderList, renderProject, renderTodo, type MdProject, type MdTodo } from "./markdown";
+import { createRuntime } from "./runtime";
+import { errmsg, isSandboxAutomationError, normalizeThingsValue, type ThingsRuntime } from "./shared";
 
-const doctorTempDir = mkdtempSync(join(tmpdir(), "nico-things-mcp-doctor-"));
-const doctorDbPath = join(doctorTempDir, "healthy.sqlite");
-const partialDoctorDbPath = join(doctorTempDir, "partial.sqlite");
+const dir = mkdtempSync(join(tmpdir(), "nico-things-mcp-tools-"));
+const dbPath = join(dir, "things.sqlite");
+const partialDbPath = join(dir, "partial.sqlite");
+const missingDbPath = join(dir, "missing.sqlite");
 
 beforeAll(() => {
-  const db = new Database(doctorDbPath, { create: true });
-  db.run(`create table TMTask (
-    uuid text, type integer, status integer, title text, notes text,
-    deadline integer, startDate integer, stopDate real, creationDate real,
-    todayIndex integer, "index" integer, userModificationDate real,
-    openUntrashedLeafActionsCount integer,
-    project text, area text, heading text, trashed integer, start integer
-  )`);
-  db.run(`create table TMArea (uuid text, title text, "index" integer)`);
-  db.run(`create table TMTag (uuid text, title text, "index" integer)`);
-  db.run(`create table TMTaskTag (tasks text, tags text)`);
-  db.run(`create table TMChecklistItem (task text, title text, status integer, "index" integer)`);
-  db.close(false);
-
-  const partialDb = new Database(partialDoctorDbPath, { create: true });
-  partialDb.run("create table TMTask (uuid text)");
-  partialDb.close(false);
+  createFixtureDb(dbPath);
+  const partial = new Database(partialDbPath, { create: true });
+  partial.run("create table TMTask (uuid text)");
+  partial.close(false);
 });
 
 afterAll(() => {
-  rmSync(doctorTempDir, { force: true, recursive: true });
+  rmSync(dir, { force: true, recursive: true });
 });
 
-type Call = {
-  body: string;
-  args: Record<string, unknown> | undefined;
-  signal?: AbortSignal;
-};
+const normalizeThingsJson = (text: string) => JSON.stringify(normalizeThingsValue(JSON.parse(text)));
+
+type JxaFn = (body: string, args?: Record<string, unknown>) => Promise<string> | string;
 
 function createMockApp({
   token = "token",
+  dbPath = null,
   jxa,
   quietUrl,
-  quietJson,
-  fastListRead,
-  sortListItems,
-  statsQuery,
-  inspect,
 }: {
   token?: string;
-  jxa?: (body: string, args?: Record<string, unknown>, options?: { signal?: AbortSignal }) => Promise<string> | string;
-  quietUrl?: (path: string, params: Record<string, string | undefined>, options?: { signal?: AbortSignal }) => Promise<void> | void;
-  quietJson?: (operations: Array<Record<string, unknown>>, reveal?: boolean, options?: { signal?: AbortSignal }) => Promise<void> | void;
-  fastListRead?: (
-    list: string,
-    options?: {
-      limit?: number;
-      offset?: number;
-      completed_after?: string;
-      completed_before?: string;
-    },
-    callOptions?: { signal?: AbortSignal },
-  ) => Promise<string | null> | string | null;
-  sortListItems?: (list: string, items: Array<Record<string, unknown>>) => Array<Record<string, unknown>>;
-  statsQuery?: (window: StatsWindow) => Promise<StatsResult | null> | StatsResult | null;
-  inspect?: () => RuntimeInspection;
+  dbPath?: string | null;
+  jxa?: JxaFn;
+  quietUrl?: () => Promise<void> | void;
 } = {}) {
-  const jxaCalls: Call[] = [];
+  const jxaCalls: Array<{ body: string; args?: Record<string, unknown>; signal?: AbortSignal }> = [];
   const quietCalls: Array<{ path: string; params: Record<string, string | undefined> }> = [];
-  const quietJsonCalls: Array<{ operations: Array<Record<string, unknown>>; reveal?: boolean }> = [];
-  const statsCalls: Array<{ window: StatsWindow }> = [];
+  const quietJsonCalls: Array<Array<Record<string, unknown>>> = [];
 
   const runtime: ThingsRuntime = {
     token,
+    appPath: "/Applications/Things3.app",
+    dbPath,
     async jxa(body, args, options) {
       jxaCalls.push({ body, args, signal: options?.signal });
-      if (!jxa) return "[]";
-      return await jxa(body, args, options);
+      return jxa ? await jxa(body, args) : "[]";
     },
-    async quietUrl(path, params, options) {
+    async quietUrl(path, params) {
       quietCalls.push({ path, params });
-      await quietUrl?.(path, params, options);
+      await quietUrl?.();
     },
-    async quietJson(operations, reveal, options) {
-      quietJsonCalls.push({ operations, reveal });
-      await quietJson?.(operations, reveal, options);
-    },
-    async fastListRead(list, options, callOptions) {
-      return (await fastListRead?.(list, options, callOptions)) ?? null;
-    },
-    sortListItems(list, items) {
-      return sortListItems ? sortListItems(list, items) : items;
-    },
-    async statsQuery(window) {
-      statsCalls.push({ window });
-      if (!statsQuery) return null;
-      return (await statsQuery(window)) ?? null;
-    },
-    inspect() {
-      return inspect
-        ? inspect()
-        : {
-            appPath: "/Applications/Things3.app",
-            appPathExists: true,
-            fastReadsEnabled: true,
-            dbPath: null,
-          };
+    async quietJson(operations) {
+      quietJsonCalls.push(operations);
     },
   };
 
   const { tools } = createServer(runtime);
-  return { tools, jxaCalls, quietCalls, quietJsonCalls, statsCalls };
+  return { tools, jxaCalls, quietCalls, quietJsonCalls };
 }
 
-async function callTool(tool: unknown, args: Record<string, unknown>, extra: Record<string, unknown> = {}) {
-  return await (tool as (args: Record<string, unknown>, extra: unknown) => Promise<unknown>)(args, extra);
+// Returns the JXA responses in order, repeating the last one.
+function sequence(...responses: string[]): JxaFn {
+  let index = 0;
+  return () => responses[Math.min(index++, responses.length - 1)]!;
 }
 
-function textOf(result: unknown) {
-  return (result as { content: Array<{ text: string }> }).content[0]?.text;
+async function callTool(tool: { handler: unknown }, args: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+  return await (tool.handler as (args: Record<string, unknown>, extra: unknown) => Promise<unknown>)(args, extra);
+}
+
+function textOf(result: unknown): string {
+  return (result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
+}
+
+function jsonOf(result: unknown): unknown {
+  return JSON.parse(textOf(result));
 }
 
 function isError(result: unknown) {
@@ -148,20 +89,13 @@ function isError(result: unknown) {
 }
 
 function parseToolInput(tool: { inputSchema?: unknown }, input: unknown): unknown {
-  const schema = tool.inputSchema;
-  if (
-    schema == null ||
-    typeof schema !== "object" ||
-    !("parse" in schema) ||
-    typeof schema.parse !== "function"
-  ) {
-    throw new Error("Tool input schema is not parsable");
-  }
-  return schema.parse(input);
+  return (tool.inputSchema as { parse(input: unknown): unknown }).parse(input);
 }
 
+const ids = (result: unknown) => (jsonOf(result) as Array<{ id: string }>).map((item) => item.id);
+
 describe("runtime", () => {
-  test("errmsg prefers stderr and strips osascript wrapper", () => {
+  test("errmsg prefers stderr and strips the osascript wrapper", () => {
     const error = Object.assign(new Error("fallback"), {
       stderr: "execution error: Missing permission (-1743)\n",
     });
@@ -174,27 +108,20 @@ describe("runtime", () => {
       process.execPath,
       [
         "-e",
-        [
-          'import { isoDayToUnixStart, isoDayToUnixEnd } from "./src/shared.ts";',
-          'console.log(JSON.stringify([isoDayToUnixStart("2026-04-23"), isoDayToUnixEnd("2026-04-23")]));',
-        ].join(" "),
+        'import { isoDayToUnixStart, isoDayToUnixEnd } from "./src/shared.ts"; console.log(JSON.stringify([isoDayToUnixStart("2026-04-23"), isoDayToUnixEnd("2026-04-23")]));',
       ],
-      {
-        cwd: process.cwd(),
-        env: { ...process.env, TZ: "Asia/Hong_Kong" },
-        encoding: "utf8",
-      },
+      { cwd: process.cwd(), env: { ...process.env, TZ: "Asia/Hong_Kong" }, encoding: "utf8" },
     );
 
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout.trim())).toEqual([1776873600, 1776959999]);
   });
 
-  test("jxa builds the osascript invocation", async () => {
+  test("jxa runs the body after the shared prelude with arguments as JSON", async () => {
     const calls: Array<{ file: string; args: string[]; options?: { signal?: AbortSignal } }> = [];
     const controller = new AbortController();
     const runtime = createRuntime({
-      token: "token",
+      dbPath: null,
       execFn: async (file, args, options) => {
         calls.push({ file, args, options });
         return { stdout: "  ok  " };
@@ -203,58 +130,51 @@ describe("runtime", () => {
 
     const result = await runtime.jxa("return JSON.stringify(P);", { hello: "world" }, { signal: controller.signal });
     expect(result).toBe("ok");
-    expect(calls).toHaveLength(1);
     expect(calls[0]?.file).toBe("osascript");
-    expect(calls[0]?.args[0]).toBe("-l");
-    expect(calls[0]?.args[1]).toBe("JavaScript");
+    expect(calls[0]?.args.slice(0, 3)).toEqual(["-l", "JavaScript", "-e"]);
     expect(calls[0]?.args[3]).toContain('var app = Application("/Applications/Things3.app");');
+    expect(calls[0]?.args[3]).toContain("raw.split(/,\\s*/)");
+    expect(calls[0]?.args[3]?.endsWith("return JSON.stringify(P);\n}")).toBeTrue();
     expect(calls[0]?.args[4]).toBe(JSON.stringify({ hello: "world" }));
     expect(calls[0]?.options?.signal).toBe(controller.signal);
   });
 
   test("quietUrl encodes params and keeps Things in the background", async () => {
-    const calls: Array<{ file: string; args: string[] }> = [];
+    const calls: string[][] = [];
     const runtime = createRuntime({
-      token: "token",
-      execFn: async (file, args) => {
-        calls.push({ file, args });
+      dbPath: null,
+      execFn: async (_file, args) => {
+        calls.push(args);
         return { stdout: "" };
       },
     });
 
-    await runtime.quietUrl("show", {
-      query: "Today & Next",
-      id: "abc/123",
-    });
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.args[3]).toContain("things:///show?query=Today%20%26%20Next&id=abc%2F123");
-    expect(calls[0]?.args[3]).toContain("c.activates = false;");
+    await runtime.quietUrl("show", { query: "Today & Next", id: "abc/123", skipped: undefined });
+    expect(calls[0]?.[3]).toContain("things:///show?query=Today%20%26%20Next&id=abc%2F123\"");
+    expect(calls[0]?.[3]).toContain("c.activates = false;");
   });
 
-  test("quietJson dispatches the JSON endpoint and auth token for updates", async () => {
-    const calls: Array<{ file: string; args: string[] }> = [];
+  test("quietJson sends the auth token only for updates", async () => {
+    const calls: string[][] = [];
     const runtime = createRuntime({
       token: "token",
-      execFn: async (file, args) => {
-        calls.push({ file, args });
+      dbPath: null,
+      execFn: async (_file, args) => {
+        calls.push(args);
         return { stdout: "" };
       },
     });
 
-    await runtime.quietJson([
-      {
-        type: "to-do",
-        operation: "update",
-        id: "1",
-        attributes: { when: "someday" },
-      },
-    ]);
+    await runtime.quietJson([{ type: "to-do", operation: "update", id: "1", attributes: { when: "someday" } }]);
+    await runtime.quietJson([{ type: "to-do", attributes: { title: "New" } }]);
+    expect(calls[0]?.[3]).toContain("things:///json?auth-token=token&reveal=false&data=");
+    expect(calls[0]?.[3]).toContain("%22operation%22%3A%22update%22");
+    expect(calls[1]?.[3]).not.toContain("auth-token");
+  });
 
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.args[3]).toContain("things:///json?");
-    expect(calls[0]?.args[3]).toContain("auth-token=token");
-    expect(calls[0]?.args[3]).toContain("%22operation%22%3A%22update%22");
+  test("quietJson refuses updates without a token", async () => {
+    const runtime = createRuntime({ token: "", dbPath: null, execFn: async () => ({ stdout: "" }) });
+    await expect(runtime.quietJson([{ operation: "update" }])).rejects.toThrow("THINGS_AUTH_TOKEN is required");
   });
 
   test("detects sandboxed Apple Events failures", () => {
@@ -265,528 +185,470 @@ describe("runtime", () => {
     expect(isSandboxAutomationError(sandboxError)).toBeTrue();
     expect(isSandboxAutomationError(new Error("boom"))).toBeFalse();
   });
-
-  test("verifies Things access with a read-only startup probe", async () => {
-    let seenBody = "";
-    const runtime: ThingsRuntime = {
-      token: "token",
-      async jxa(body) {
-        seenBody = body;
-        return '["Inbox","Today"]';
-      },
-      async quietUrl() {},
-      async quietJson() {},
-      async fastListRead() { return null; },
-      sortListItems(_list, items) { return items; },
-      async statsQuery() { return null; },
-      inspect() {
-        return {
-          appPath: "/Applications/Things3.app",
-          appPathExists: true,
-          fastReadsEnabled: true,
-          dbPath: null,
-        };
-      },
-    };
-
-    await verifyThingsAccess(runtime);
-    expect(seenBody).toContain("app.lists().map");
-  });
-
-  test("rewrites sandbox startup failures into a clear message", async () => {
-    const runtime: ThingsRuntime = {
-      token: "token",
-      async jxa() {
-        throw Object.assign(new Error("fallback"), {
-          stderr:
-            "Connection Invalid error for service com.apple.hiservices-xpcservice.\nError received in message reply handler: Connection invalid\n",
-        });
-      },
-      async quietUrl() {},
-      async quietJson() {},
-      async fastListRead() { return null; },
-      sortListItems(_list, items) { return items; },
-      async statsQuery() { return null; },
-      inspect() {
-        return {
-          appPath: "/Applications/Things3.app",
-          appPathExists: true,
-          fastReadsEnabled: true,
-          dbPath: null,
-        };
-      },
-    };
-
-    expect(verifyThingsAccess(runtime)).rejects.toThrow(
-      "Things 3 automation is blocked by the current sandbox. Run cositas outside the Codex sandbox or another restricted osascript environment.",
-    );
-  });
-
-  test("rewrites non-sandbox startup failures without hiding the cause", async () => {
-    const runtime: ThingsRuntime = {
-      token: "token",
-      async jxa() {
-        throw new Error("Application can't be found.");
-      },
-      async quietUrl() {},
-      async quietJson() {},
-      async fastListRead() { return null; },
-      sortListItems(_list, items) { return items; },
-      async statsQuery() { return null; },
-      inspect() {
-        return {
-          appPath: "/Applications/Things3.app",
-          appPathExists: true,
-          fastReadsEnabled: true,
-          dbPath: null,
-        };
-      },
-    };
-
-    expect(verifyThingsAccess(runtime)).rejects.toThrow(
-      "Things 3 startup check failed: Application can't be found.",
-    );
-  });
 });
 
 describe("read", () => {
   test("requires exactly one selector", async () => {
-    const { tools } = createMockApp();
-    const result = await callTool(tools.read.handler, {});
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("Provide exactly one of list, project, area, or id");
-  });
-
-  test("rejects multiple selectors", async () => {
-    const { tools } = createMockApp();
-    const result = await callTool(tools.read.handler, { list: "today", id: "x" });
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("Provide exactly one of list, project, area, or id");
-  });
-
-  test("reads an item by id through the shared detail script", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () => '{"id":"1"}',
-    });
-    const controller = new AbortController();
-
-    const result = await callTool(tools.read.handler, { id: "1" }, { signal: controller.signal });
-    expect(textOf(result)).toBe('{"id":"1"}');
-    expect(jxaCalls).toHaveLength(1);
-    expect(jxaCalls[0]?.body).toContain("toDoChecklistItems");
-    expect(jxaCalls[0]?.body.indexOf("app.projects.byId")).toBeLessThan(
-      jxaCalls[0]?.body.indexOf("app.toDos.byId") ?? -1,
-    );
-    expect(jxaCalls[0]?.args).toEqual({ id: "1" });
-    expect(jxaCalls[0]?.signal).toBe(controller.signal);
-  });
-
-  test("maps built-in list names", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () => "[]",
-    });
-
-    await callTool(tools.read.handler, { list: "today" });
-    expect(jxaCalls[0]?.args).toEqual({
-      n: LIST_NAMES.today,
-      completedAfter: null,
-      completedBefore: null,
-    });
-  });
-
-  test("built-in list reads include projects as well as todos", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () => "[]",
-    });
-
-    await callTool(tools.read.handler, { list: "today" });
-    expect(jxaCalls[0]?.body).toContain("list.projects().map(projectOf)");
-    expect(jxaCalls[0]?.body).toContain("todos.concat(projects)");
-  });
-
-  test("built-in list reads pass merged items through the sorter", async () => {
-    const { tools } = createMockApp({
-      jxa: async () => '[{"id":"todo-1","kind":"todo"},{"id":"proj-1","kind":"project"}]',
-      sortListItems: (list, items) => {
-        expect(list).toBe("today");
-        expect(items).toEqual([
-          { id: "todo-1", kind: "todo" },
-          { id: "proj-1", kind: "project" },
-        ]);
-        return [...items].reverse();
-      },
-    });
-
-    const result = await callTool(tools.read.handler, { list: "today" });
-    expect(textOf(result)).toBe('[{"id":"proj-1","kind":"project"},{"id":"todo-1","kind":"todo"}]');
-  });
-
-  test("passes pagination and completion window through to list reads", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () => "[]",
-    });
-
-    await callTool(tools.read.handler, {
-      list: "logbook",
-      limit: 25,
-      offset: 50,
-      completed_after: "2026-04-01",
-      completed_before: "2026-04-06",
-    });
-
-    expect(jxaCalls[0]?.body).toContain("todos.concat(projects)");
-    expect(jxaCalls[0]?.body).toContain("P.completedAfter || P.completedBefore");
-    expect(jxaCalls[0]?.args).toEqual({
-      n: LIST_NAMES.logbook,
-      completedAfter: "2026-04-01",
-      completedBefore: "2026-04-06",
-    });
-  });
-
-  test("applies built-in list pagination after sorting the full result set", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () =>
-        '[{"id":"todo-1","kind":"todo"},{"id":"todo-2","kind":"todo"},{"id":"proj-1","kind":"project"}]',
-      sortListItems: (_list, items) => [items[2]!, items[0]!, items[1]!],
-    });
-
-    const result = await callTool(tools.read.handler, {
-      list: "today",
-      limit: 1,
-      offset: 1,
-    });
-
-    expect(textOf(result)).toBe('[{"id":"todo-1","kind":"todo"}]');
-    expect(jxaCalls[0]?.args).toEqual({
-      n: LIST_NAMES.today,
-      completedAfter: null,
-      completedBefore: null,
-    });
-  });
-
-  test("uses fast list reads for heavy built-in lists when available", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      fastListRead: async (list, options) => {
-        expect(list).toBe("logbook");
-        expect(options).toEqual({
-          limit: 10,
-          offset: 20,
-          completed_after: "2026-04-01",
-          completed_before: "2026-04-06",
-        });
-        return '[{"kind":"project","id":"p1"},{"kind":"todo","id":"t1"}]';
-      },
-    });
-
-    const result = await callTool(tools.read.handler, {
-      list: "logbook",
-      limit: 10,
-      offset: 20,
-      completed_after: "2026-04-01",
-      completed_before: "2026-04-06",
-    });
-
-    expect(textOf(result)).toBe('[{"kind":"project","id":"p1"},{"kind":"todo","id":"t1"}]');
+    const { tools, jxaCalls } = createMockApp();
+    for (const args of [{}, { list: "today", id: "x" }]) {
+      const result = await callTool(tools.read, args);
+      expect(isError(result)).toBeTrue();
+      expect(textOf(result)).toBe("Provide exactly one of list, project, area, or id");
+    }
     expect(jxaCalls).toHaveLength(0);
   });
 
-  test("uses fast list reads for today and inbox so JXA quirks don't starve them", async () => {
-    const seen: string[] = [];
-    const { tools, jxaCalls } = createMockApp({
-      fastListRead: async (list) => {
-        seen.push(list);
-        if (list === "today") return '[{"kind":"todo","id":"t1","name":"Do"}]';
-        if (list === "inbox") return '[]';
-        return null;
-      },
+  test("reads every selector from SQLite without touching Things", async () => {
+    const { tools, jxaCalls } = createMockApp({ dbPath });
+
+    expect(ids(await callTool(tools.read, { list: "today" }))).toEqual([
+      "t-today-b",
+      "t-today-a",
+      "t-unconfirmed",
+      "proj-4",
+      "t-overdue",
+      "t-inbox-due",
+      "t-evening",
+    ]);
+    expect(ids(await callTool(tools.read, { list: "logbook", limit: 1, offset: 1 }))).toEqual(["proj-2"]);
+    expect(ids(await callTool(tools.read, { project: "Website" }))).toEqual(["t-pa", "t-pb", "t-ph"]);
+    expect(ids(await callTool(tools.read, { area: "Work" }))).toEqual(["proj-1", "proj-3"]);
+    expect(ids(await callTool(tools.read, { list: "projects" }))).toEqual(["proj-1", "proj-3", "proj-4"]);
+    expect(ids(await callTool(tools.read, { list: "areas" }))).toEqual(["area-1", "area-2"]);
+    expect(ids(await callTool(tools.read, { list: "tags" }))).toEqual(["tag-1", "tag-2"]);
+    expect(jsonOf(await callTool(tools.read, { id: "t-pa" }))).toMatchObject({
+      id: "t-pa",
+      checklistItems: [{ name: "Step one", done: true }, { name: "Step two", done: false }],
     });
-
-    const todayResult = await callTool(tools.read.handler, { list: "today" });
-    expect(textOf(todayResult)).toBe('[{"kind":"todo","id":"t1","name":"Do"}]');
-
-    const inboxResult = await callTool(tools.read.handler, { list: "inbox" });
-    expect(textOf(inboxResult)).toBe("[]");
-
-    expect(seen).toEqual(["today", "inbox"]);
     expect(jxaCalls).toHaveLength(0);
   });
 
-  test("defaults built-in list reads to a bounded page", async () => {
+  test("defaults list reads to a bounded page", async () => {
     const { tools } = createMockApp({
-      fastListRead: async (_list, options) => {
-        expect(options?.limit).toBe(100);
-        expect(options?.offset).toBe(0);
-        return "[]";
-      },
+      jxa: async () => JSON.stringify(Array.from({ length: 150 }, (_, index) => ({ id: `t-${index}` }))),
     });
-
-    await callTool(tools.read.handler, { list: "today" });
+    const result = await callTool(tools.read, { list: "anytime" });
+    expect(ids(result)).toHaveLength(100);
+    expect(() => parseToolInput(tools.read, { list: "today", limit: 501 })).toThrow();
   });
 
-  test("lists open projects, areas, and tags", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () => "[]",
-    });
-
-    await callTool(tools.read.handler, { list: "projects" });
-    await callTool(tools.read.handler, { list: "areas" });
-    await callTool(tools.read.handler, { list: "tags" });
-
-    expect(jxaCalls[0]?.body).toContain('p.status()==="open"');
-    expect(jxaCalls[1]?.body).toContain("app.areas().map");
-    expect(jxaCalls[2]?.body).toContain("app.tags().map");
-  });
-
-  test("reads a project by exact name", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () => "[]",
-    });
-
-    await callTool(tools.read.handler, { project: "Launch" });
-    expect(jxaCalls[0]?.body).toContain("app.projects.byName(P.n); p.id();");
-    expect(jxaCalls[0]?.args).toEqual({
-      n: "Launch",
-      limit: null,
-      offset: 0,
-      completedAfter: null,
-      completedBefore: null,
-    });
-  });
-
-  test("reads an area by exact area match", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () => "[]",
-    });
-
-    await callTool(tools.read.handler, { area: "Work" });
-    expect(jxaCalls[0]?.body).toContain("p.area().name() === target");
-    expect(jxaCalls[0]?.args).toEqual({ n: "Work" });
-  });
-
-  test("falls back to JXA when a direct SQLite read fails", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      inspect: () => ({
-        appPath: "/Applications/Things3.app",
-        appPathExists: true,
-        fastReadsEnabled: true,
-        dbPath: "/missing/Things.sqlite",
-      }),
-      jxa: async () => '[{"id":"todo-1","kind":"todo","name":"Fallback"}]',
-      sortListItems: (_list, items) => items,
-    });
-
-    const result = await callTool(tools.read.handler, { list: "today" });
-
-    expect(isError(result)).toBeFalse();
-    expect(textOf(result)).toContain('"Fallback"');
-    expect(jxaCalls).toHaveLength(1);
-  });
-
-  test("falls back to JXA for every SQL-backed selector when SQLite fails", async () => {
-    const selectors = [
-      { list: "projects" },
-      { list: "areas" },
-      { list: "tags" },
-      { id: "todo-1" },
-      { project: "Launch" },
-      { area: "Work" },
+  test("falls back to JXA for every selector when SQLite fails", async () => {
+    const cases: Array<[Record<string, unknown>, Record<string, unknown> | undefined, string]> = [
+      [{ id: "t-1" }, { id: "t-1", childChecklists: false }, "app.projects.byId(P.id)"],
+      [{ project: "Launch" }, { name: "Launch" }, "app.projects.byName(P.name)"],
+      [{ area: "Work" }, { name: "Work" }, "p.area().name() === P.name"],
+      [{ list: "projects" }, undefined, "app.projects()"],
+      [{ list: "areas" }, undefined, "app.areas()"],
+      [{ list: "tags" }, undefined, "app.tags()"],
+      [{ list: "anytime" }, { name: "Anytime" }, "app.lists.byName(P.name)"],
     ];
-
-    for (const selector of selectors) {
-      const { tools, jxaCalls } = createMockApp({
-        inspect: () => ({
-          appPath: "/Applications/Things3.app",
-          appPathExists: true,
-          fastReadsEnabled: true,
-          dbPath: "/missing/Things.sqlite",
-        }),
-        jxa: async () => "[]",
-      });
-
-      const result = await callTool(tools.read.handler, selector);
-
-      expect(isError(result)).toBeFalse();
-      expect(jxaCalls).toHaveLength(1);
+    for (const dbPathCase of [missingDbPath, partialDbPath, null]) {
+      for (const [args, jxaArgs, bodyPart] of cases) {
+        const { tools, jxaCalls } = createMockApp({
+          dbPath: dbPathCase,
+          jxa: async () => (args.id ? '{"id":"t-1"}' : "[]"),
+        });
+        const result = await callTool(tools.read, args);
+        expect(isError(result)).toBeFalse();
+        expect(jxaCalls).toHaveLength(1);
+        expect(jxaCalls[0]?.args).toEqual(jxaArgs);
+        expect(jxaCalls[0]?.body).toContain(bodyPart);
+      }
     }
   });
 
-  test("keeps computed-list reads on JXA when auxiliary SQLite helpers fail", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      fastListRead: async () => {
-        throw new Error("database is locked");
-      },
-      sortListItems: () => {
-        throw new Error("database is locked");
-      },
-      jxa: async () => '[{"id":"todo-1","kind":"todo","name":"Fallback"}]',
-    });
+  test("JXA reads by id try projects before todos and pass the abort signal", async () => {
+    const { tools, jxaCalls } = createMockApp({ jxa: async () => '{"id":"1"}' });
+    const controller = new AbortController();
 
-    const result = await callTool(tools.read.handler, { list: "anytime" });
-
-    expect(isError(result)).toBeFalse();
-    expect(textOf(result)).toContain('"Fallback"');
-    expect(jxaCalls).toHaveLength(1);
+    await callTool(tools.read, { id: "1" }, { signal: controller.signal });
+    const body = jxaCalls[0]?.body ?? "";
+    expect(body.indexOf("app.projects.byId")).toBeLessThan(body.indexOf("app.toDos.byId"));
+    expect(jxaCalls[0]?.signal).toBe(controller.signal);
   });
 
-  test("returns read errors from jxa", async () => {
+  test("JXA list fallback applies the completion window, then pages", async () => {
+    const { tools } = createMockApp({
+      jxa: async () =>
+        JSON.stringify([
+          { id: "early", status: "completed", completionDate: "2026-03-31T12:00:00.000Z" },
+          { id: "a", status: "completed", completionDate: "2026-04-02T12:00:00.000Z" },
+          { id: "b", status: "canceled", cancellationDate: "2026-04-03T12:00:00.000Z" },
+          { id: "c", status: "completed", completionDate: "2026-04-04T12:00:00.000Z" },
+          { id: "open", status: "open" },
+        ]),
+    });
+
+    const result = await callTool(tools.read, {
+      list: "logbook",
+      completed_after: "2026-04-01",
+      completed_before: "2026-04-06",
+      limit: 2,
+      offset: 1,
+    });
+    expect(ids(result)).toEqual(["b", "c"]);
+  });
+
+  test("returns read errors from JXA", async () => {
     const { tools } = createMockApp({
       jxa: async () => {
         throw new Error("boom");
       },
     });
-
-    const result = await callTool(tools.read.handler, { list: "today" });
+    const result = await callTool(tools.read, { list: "today" });
     expect(isError(result)).toBeTrue();
     expect(textOf(result)).toBe("boom");
   });
 });
 
 describe("doctor", () => {
-  test("reports SQL reads, JXA reads, and JSON writes as independent capabilities", async () => {
-    const { tools } = createMockApp({
-      jxa: async () => '["Inbox","Today"]',
-      inspect: () => ({
-        appPath: "/Applications/Things3.app",
-        appPathExists: true,
-        fastReadsEnabled: true,
-        dbPath: doctorDbPath,
-      }),
-    });
+  type Report = { ok: boolean; checks: Record<string, { ok: boolean; message: string }> };
 
-    const result = await callTool(tools.doctor.handler, {});
-    const report = JSON.parse(textOf(result) ?? "{}") as {
-      ok: boolean;
-      checks: Record<string, { ok: boolean; message: string; available?: boolean }>;
-    };
+  async function doctor(options: Parameters<typeof createMockApp>[0]): Promise<Report> {
+    const { tools } = createMockApp(options);
+    return jsonOf(await callTool(tools.doctor, {})) as Report;
+  }
 
+  const jxaWorks = async () => '["Inbox","Today"]';
+  const jxaFails = async () => {
+    throw new Error("Application can't be found.");
+  };
+
+  test("reports SQL reads, JXA reads, and JSON writes as independent checks", async () => {
+    const report = await doctor({ dbPath, jxa: jxaWorks });
     expect(report.ok).toBeTrue();
     expect(Object.keys(report.checks)).toEqual(["sql_read", "jxa_read", "json_writes"]);
-    expect(report.checks.sql_read?.ok).toBeTrue();
-    expect(report.checks.sql_read?.available).toBeTrue();
-    expect(report.checks.jxa_read?.ok).toBeTrue();
-    expect(report.checks.json_writes?.ok).toBeTrue();
+    expect(Object.values(report.checks).every((check) => check.ok)).toBeTrue();
   });
 
-  test("reports unhealthy when neither read path works", async () => {
-    const { tools } = createMockApp({
-      token: "",
-      jxa: async () => {
-        throw new Error("Application can't be found.");
-      },
-      inspect: () => ({
-        appPath: "/Applications/MissingThings.app",
-        appPathExists: false,
-        fastReadsEnabled: true,
-        dbPath: null,
-      }),
-    });
-
-    const result = await callTool(tools.doctor.handler, {});
-    const report = JSON.parse(textOf(result) ?? "{}") as {
-      ok: boolean;
-      checks: Record<string, { ok: boolean; message: string }>;
-    };
-
+  test("is unhealthy only when neither read path works", async () => {
+    const report = await doctor({ token: "", jxa: jxaFails });
     expect(report.ok).toBeFalse();
-    expect(report.checks.sql_read?.ok).toBeFalse();
-    expect(report.checks.jxa_read?.ok).toBeFalse();
-    expect(report.checks.jxa_read?.message).toBe("Things 3 startup check failed: Application can't be found.");
+    expect(report.checks.jxa_read?.message).toBe("Things startup check failed: Application can't be found.");
     expect(report.checks.json_writes?.ok).toBeFalse();
+
+    expect((await doctor({ token: "", jxa: jxaWorks })).ok).toBeTrue();
+    expect((await doctor({ dbPath, jxa: jxaFails })).ok).toBeTrue();
   });
 
-  test("stays healthy when only JXA reads work and JSON writes are not configured", async () => {
-    const { tools } = createMockApp({
+  test("does not report SQL reads healthy for a missing database or an incomplete schema", async () => {
+    for (const path of [missingDbPath, partialDbPath]) {
+      const report = await doctor({ dbPath: path, jxa: jxaFails });
+      expect(report.ok).toBeFalse();
+      expect(report.checks.sql_read?.ok).toBeFalse();
+    }
+  });
+
+  test("explains sandboxed automation failures", async () => {
+    const report = await doctor({
+      jxa: async () => {
+        throw Object.assign(new Error("fallback"), { stderr: "Connection Invalid error for service com.apple.hiservices-xpcservice." });
+      },
+    });
+    expect(report.checks.jxa_read?.message).toBe(
+      "Things automation is blocked by the current sandbox. Run the server outside the sandbox.",
+    );
+  });
+});
+
+describe("search", () => {
+  test("requires a query or tag", async () => {
+    const { tools } = createMockApp();
+    const result = await callTool(tools.search, {});
+    expect(isError(result)).toBeTrue();
+    expect(textOf(result)).toBe("Provide query or tag");
+  });
+
+  test("searches SQLite when it is available", async () => {
+    const { tools, jxaCalls } = createMockApp({ dbPath });
+    expect(ids(await callTool(tools.search, { query: "report", tag: "urgent" }))).toEqual(["t-search"]);
+    expect(jxaCalls).toHaveLength(0);
+  });
+
+  test("falls back to JXA with filters and bounded paging", async () => {
+    const { tools, jxaCalls } = createMockApp({ dbPath: missingDbPath });
+    await callTool(tools.search, { query: "ship", tag: "ops" });
+    await callTool(tools.search, { tag: "ops", limit: 25, offset: 50 });
+    expect(jxaCalls[0]?.args).toEqual({ query: "ship", tag: "ops", limit: 100, offset: 0 });
+    expect(jxaCalls[1]?.args).toEqual({ query: null, tag: "ops", limit: 25, offset: 50 });
+    expect(jxaCalls[0]?.body).toContain("tagsOf(t).some");
+    expect(() => parseToolInput(tools.search, { query: "ship", limit: 501 })).toThrow();
+  });
+});
+
+describe("add_todo", () => {
+  test("exposes strict date validation", () => {
+    const { tools } = createMockApp();
+    expect(() => parseToolInput(tools.add_todo, { title: "x", when: "later" })).toThrow();
+    expect(() => parseToolInput(tools.add_todo, { title: "x", deadline: "2026-4-1" })).toThrow();
+    expect(() => parseToolInput(tools.add_todo, { title: "x", deadline: "2026-99-99" })).toThrow();
+    expect(() => parseToolInput(tools.add_todo, { title: "x", when: "2026-04-01" })).not.toThrow();
+  });
+
+  test("creates a todo with JXA alone when no JSON-only fields are used", async () => {
+    const { tools, jxaCalls, quietCalls, quietJsonCalls } = createMockApp({
       token: "",
-      jxa: async () => '["Inbox","Today"]',
-      inspect: () => ({
-        appPath: "/Applications/Things3.app",
-        appPathExists: true,
-        fastReadsEnabled: true,
-        dbPath: null,
-      }),
+      jxa: async () => '{"id":"todo-1","name":"Draft","status":"open"}',
     });
 
-    const result = await callTool(tools.doctor.handler, {});
-    const report = JSON.parse(textOf(result) ?? "{}") as {
-      ok: boolean;
-      checks: Record<string, { ok: boolean; message: string }>;
-    };
-
-    expect(report.ok).toBeTrue();
-    expect(report.checks.sql_read?.ok).toBeFalse();
-    expect(report.checks.jxa_read?.ok).toBeTrue();
-    expect(report.checks.json_writes?.ok).toBeFalse();
+    const result = await callTool(tools.add_todo, { title: "Draft", list: "Roadmap", checklist_items: [] });
+    expect(textOf(result)).toBe('{"id":"todo-1","name":"Draft","status":"open"}');
+    expect(jxaCalls[0]?.body).toContain("project.id();");
+    expect(quietCalls).toHaveLength(0);
+    expect(quietJsonCalls).toHaveLength(0);
   });
 
-  test("stays healthy when only SQL reads work", async () => {
+  test("requires auth before creating anything that needs a JSON patch", async () => {
+    const { tools, jxaCalls } = createMockApp({ token: "" });
+    for (const args of [{ tags: ["ops,urgent"] }, { when: "evening" }, { checklist_items: ["A"] }]) {
+      const result = await callTool(tools.add_todo, { title: "Draft", ...args });
+      expect(isError(result)).toBeTrue();
+      expect(textOf(result)).toBe("THINGS_AUTH_TOKEN is required for this operation");
+    }
+    expect(jxaCalls).toHaveLength(0);
+  });
+
+  test("patches JSON-only fields after creation and re-reads the todo", async () => {
+    const { tools, jxaCalls, quietJsonCalls } = createMockApp({
+      jxa: sequence(
+        '{"id":"todo-1","name":"Draft","status":"open"}',
+        '{"id":"todo-1","name":"Draft","checklistItems":[{"name":"A","done":false}]}',
+      ),
+    });
+
+    const result = await callTool(tools.add_todo, { title: "Draft", when: "someday", checklist_items: ["A"] });
+    expect(textOf(result)).toContain('"checklistItems"');
+    expect(quietJsonCalls).toEqual([
+      [
+        {
+          type: "to-do",
+          operation: "update",
+          id: "todo-1",
+          attributes: {
+            when: "someday",
+            "checklist-items": [{ type: "checklist-item", attributes: { title: "A" } }],
+          },
+        },
+      ],
+    ]);
+    expect(jxaCalls).toHaveLength(2);
+    expect(jxaCalls[1]?.args).toEqual({ id: "todo-1" });
+  });
+});
+
+describe("add_project", () => {
+  test("creates a project and validates the target area in JXA", async () => {
+    const { tools, jxaCalls } = createMockApp({
+      jxa: async () => '{"id":"proj-1","name":"Launch","status":"open"}',
+    });
+
+    await callTool(tools.add_project, { title: "Launch", area: "Work", todos: ["Ship it"] });
+    expect(jxaCalls[0]?.body).toContain("area.id();");
+    expect(jxaCalls[0]?.body).toContain("t.project = proj;");
+  });
+
+  test("patches special when through JSON and re-reads", async () => {
+    const { tools, quietJsonCalls } = createMockApp({
+      jxa: sequence('{"id":"proj-1","name":"Launch","status":"open"}', '{"id":"proj-1","todos":[]}'),
+    });
+
+    const result = await callTool(tools.add_project, { title: "Launch", when: "evening" });
+    expect(textOf(result)).toContain('"todos"');
+    expect(quietJsonCalls).toEqual([
+      [{ type: "project", operation: "update", id: "proj-1", attributes: { when: "evening" } }],
+    ]);
+  });
+
+  test("returns project creation errors", async () => {
     const { tools } = createMockApp({
       jxa: async () => {
-        throw new Error("automation unavailable");
+        throw new Error("project failed");
       },
-      inspect: () => ({
-        appPath: "/Applications/Things3.app",
-        appPathExists: true,
-        fastReadsEnabled: true,
-        dbPath: doctorDbPath,
-      }),
     });
 
-    const result = await callTool(tools.doctor.handler, {});
-    const report = JSON.parse(textOf(result) ?? "{}") as {
-      ok: boolean;
-      checks: Record<string, { ok: boolean; message: string }>;
-    };
+    const result = await callTool(tools.add_project, { title: "Launch" });
+    expect(isError(result)).toBeTrue();
+    expect(textOf(result)).toBe("project failed");
+  });
+});
 
-    expect(report.ok).toBeTrue();
-    expect(report.checks.sql_read?.ok).toBeTrue();
-    expect(report.checks.jxa_read?.ok).toBeFalse();
-    expect(report.checks.json_writes?.ok).toBeTrue();
+describe("update", () => {
+  test("rejects an id-only update or an empty title before invoking Things", async () => {
+    const { tools, jxaCalls } = createMockApp();
+    const idOnly = await callTool(tools.update, { id: "1" });
+    expect(textOf(idOnly)).toBe("Provide at least one field to update");
+    const emptyTitle = await callTool(tools.update, { id: "1", title: "" });
+    expect(textOf(emptyTitle)).toBe("title must not be empty");
+    expect(jxaCalls).toHaveLength(0);
   });
 
-  test("stays healthy through JXA when the configured SQLite path is broken", async () => {
-    const { tools } = createMockApp({
-      jxa: async () => '["Inbox","Today"]',
-      inspect: () => ({
-        appPath: "/Applications/Things3.app",
-        appPathExists: true,
-        fastReadsEnabled: true,
-        dbPath: "/missing/Things.sqlite",
-      }),
-    });
-
-    const result = await callTool(tools.doctor.handler, {});
-    const report = JSON.parse(textOf(result) ?? "{}") as {
-      ok: boolean;
-      checks: Record<string, { ok: boolean; message: string }>;
-    };
-
-    expect(report.ok).toBeTrue();
-    expect(report.checks.sql_read?.ok).toBeFalse();
-    expect(report.checks.jxa_read?.ok).toBeTrue();
+  test("accepts empty strings to clear when and deadline", () => {
+    const { tools } = createMockApp();
+    expect(() => parseToolInput(tools.update, { id: "1", deadline: "" })).not.toThrow();
+    expect(() => parseToolInput(tools.update, { id: "1", deadline: "tomorrow" })).toThrow();
+    expect(() => parseToolInput(tools.update, { id: "1", when: "" })).not.toThrow();
   });
 
-  test("does not report SQL reads healthy for an incomplete Things schema", async () => {
-    const { tools } = createMockApp({
-      jxa: async () => {
-        throw new Error("automation unavailable");
-      },
-      inspect: () => ({
-        appPath: "/Applications/Things3.app",
-        appPathExists: true,
-        fastReadsEnabled: true,
-        dbPath: partialDoctorDbPath,
-      }),
+  test("returns the updated item directly when JXA covers every field", async () => {
+    const { tools, jxaCalls, quietCalls, quietJsonCalls } = createMockApp({
+      jxa: async () => '{"kind":"todo","item":{"id":"1","name":"Updated"}}',
     });
 
-    const result = await callTool(tools.doctor.handler, {});
-    const report = JSON.parse(textOf(result) ?? "{}") as {
-      ok: boolean;
-      checks: Record<string, { ok: boolean; message: string }>;
-    };
+    const result = await callTool(tools.update, { id: "1", title: "Updated", list: "Roadmap" });
+    expect(textOf(result)).toBe('{"id":"1","name":"Updated"}');
+    const body = jxaCalls[0]?.body ?? "";
+    expect(body).toContain("project.id();");
+    expect(body.indexOf("app.projects.byId")).toBeLessThan(body.indexOf("app.toDos.byId"));
+    expect(quietCalls).toHaveLength(0);
+    expect(quietJsonCalls).toHaveLength(0);
+  });
 
-    expect(report.ok).toBeFalse();
-    expect(report.checks.sql_read?.ok).toBeFalse();
-    expect(report.checks.jxa_read?.ok).toBeFalse();
+  test("uses JSON for project special-when updates", async () => {
+    const { tools, quietJsonCalls, jxaCalls } = createMockApp({
+      jxa: sequence('{"kind":"project","item":{"id":"proj-1"}}', '{"id":"proj-1","todos":[]}'),
+    });
+
+    const result = await callTool(tools.update, { id: "proj-1", when: "someday" });
+    expect(textOf(result)).toContain('"todos"');
+    expect(quietJsonCalls).toEqual([
+      [{ type: "project", operation: "update", id: "proj-1", attributes: { when: "someday" } }],
+    ]);
+    expect(jxaCalls).toHaveLength(2);
+  });
+
+  test("sends an empty checklist to clear checklist items", async () => {
+    const { tools, quietJsonCalls } = createMockApp({
+      jxa: sequence('{"kind":"todo","item":{"id":"1"}}', '{"id":"1","checklistItems":[]}'),
+    });
+
+    await callTool(tools.update, { id: "1", checklist_items: [] });
+    expect(quietJsonCalls).toEqual([[{ type: "to-do", operation: "update", id: "1", attributes: { "checklist-items": [] } }]]);
+  });
+
+  test("clears when and deadline through the update URL and still applies a JSON patch", async () => {
+    const { tools, quietCalls, quietJsonCalls } = createMockApp({
+      jxa: sequence('{"kind":"todo","item":{"id":"1"}}', '{"id":"1","activationDate":null}'),
+    });
+
+    const result = await callTool(tools.update, { id: "1", when: "", deadline: "", checklist_items: ["A"] });
+    expect(textOf(result)).toContain('"activationDate":null');
+    expect(quietCalls).toEqual([
+      { path: "update", params: { "auth-token": "token", id: "1", when: "", deadline: "" } },
+    ]);
+    expect(quietJsonCalls).toHaveLength(1);
+  });
+
+  test("fails before mutating when a JSON-only field lacks auth", async () => {
+    const { tools, jxaCalls } = createMockApp({ token: "" });
+    for (const args of [{ when: "anytime" }, { when: "" }, { deadline: "" }, { checklist_items: [] }]) {
+      const result = await callTool(tools.update, { id: "1", ...args });
+      expect(textOf(result)).toBe("THINGS_AUTH_TOKEN is required for this operation");
+    }
+    expect(jxaCalls).toHaveLength(0);
+  });
+});
+
+describe("bulk_update", () => {
+  test("requires auth and at least one field before invoking Things", async () => {
+    const noToken = createMockApp({ token: "" });
+    expect(textOf(await callTool(noToken.tools.bulk_update, { ids: ["1"], title: "Updated" }))).toBe(
+      "THINGS_AUTH_TOKEN is required for this operation",
+    );
+    const noFields = createMockApp();
+    expect(textOf(await callTool(noFields.tools.bulk_update, { ids: ["1"] }))).toBe("Provide at least one field to update");
+    expect(noToken.jxaCalls).toHaveLength(0);
+    expect(noFields.jxaCalls).toHaveLength(0);
+  });
+
+  test("updates many items with one JSON payload", async () => {
+    const { tools, quietJsonCalls, jxaCalls } = createMockApp({
+      jxa: async () => '[{"id":"1","kind":"todo"},{"id":"2","kind":"project"}]',
+    });
+
+    const result = await callTool(tools.bulk_update, { ids: ["1", "2"], title: "Updated", when: "someday", list: "Work" });
+    expect(jsonOf(result)).toEqual([
+      { id: "1", kind: "todo", updated: true },
+      { id: "2", kind: "project", updated: true },
+    ]);
+    const body = jxaCalls[0]?.body ?? "";
+    expect(body.indexOf("app.projects.byId")).toBeLessThan(body.indexOf("app.toDos.byId"));
+    expect(quietJsonCalls).toEqual([
+      [
+        { type: "to-do", operation: "update", id: "1", attributes: { title: "Updated", when: "someday", list: "Work" } },
+        { type: "project", operation: "update", id: "2", attributes: { title: "Updated", when: "someday", area: "Work" } },
+      ],
+    ]);
+  });
+
+  test("normalizes conflicting terminal states to canceled", async () => {
+    const { tools, quietJsonCalls } = createMockApp({ jxa: async () => '[{"id":"1","kind":"todo"}]' });
+
+    await callTool(tools.bulk_update, { ids: ["1"], completed: true, canceled: true });
+    expect(quietJsonCalls[0]?.[0]?.attributes).toEqual({ canceled: true });
+  });
+});
+
+describe("delete and trash", () => {
+  test("marks destructive tools and requires confirmation for empty_trash", async () => {
+    const { tools, jxaCalls } = createMockApp();
+
+    expect(tools.delete.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: false });
+    expect(tools.empty_trash.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    });
+    expect(() => parseToolInput(tools.empty_trash, {})).toThrow();
+
+    const result = await callTool(tools.empty_trash, { confirm: false });
+    expect(isError(result)).toBeTrue();
+    expect(textOf(result)).toBe("Set confirm=true to permanently empty Things Trash");
+    expect(jxaCalls).toHaveLength(0);
+  });
+
+  test("deletes an item by id, trying projects first", async () => {
+    const { tools, jxaCalls } = createMockApp({ jxa: async () => '{"id":"1","kind":"todo","deleted":true}' });
+
+    const result = await callTool(tools.delete, { id: "1" });
+    expect(textOf(result)).toBe('{"id":"1","kind":"todo","deleted":true}');
+    const body = jxaCalls[0]?.body ?? "";
+    expect(body).toContain('app.lists.byName("Logbook").toDos.byId(P.id)');
+    expect(body.indexOf("app.projects.byId")).toBeLessThan(body.indexOf("app.toDos.byId"));
+  });
+
+  test("empties trash", async () => {
+    const { tools, jxaCalls } = createMockApp({ jxa: async () => "" });
+    const result = await callTool(tools.empty_trash, { confirm: true });
+    expect(textOf(result)).toBe('{"emptied":true}');
+    expect(jxaCalls[0]?.body).toContain("app.emptyTrash()");
+  });
+});
+
+describe("show", () => {
+  test("requires an id or query", async () => {
+    const { tools } = createMockApp();
+    const result = await callTool(tools.show, {});
+    expect(isError(result)).toBeTrue();
+    expect(textOf(result)).toBe("Provide id or query");
+  });
+
+  test("dispatches a background show url", async () => {
+    const { tools, quietCalls } = createMockApp();
+    const result = await callTool(tools.show, { query: "Launch" });
+    expect(textOf(result)).toBe("Showing: Launch");
+    expect(quietCalls).toEqual([{ path: "show", params: { id: undefined, query: "Launch" } }]);
+  });
+
+  test("returns show errors", async () => {
+    const { tools } = createMockApp({
+      quietUrl: async () => {
+        throw new Error("show failed");
+      },
+    });
+    const result = await callTool(tools.show, { id: "1" });
+    expect(isError(result)).toBeTrue();
+    expect(textOf(result)).toBe("show failed");
   });
 });
 
@@ -865,542 +727,6 @@ describe("normalization", () => {
         ],
       },
     ]);
-  });
-});
-
-describe("search", () => {
-  test("requires at least one filter", async () => {
-    const { tools } = createMockApp();
-    const result = await callTool(tools.search.handler, {});
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("Provide query or tag");
-  });
-
-  test("passes query and tag filters through to jxa", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () => "[]",
-    });
-
-    await callTool(tools.search.handler, { query: "ship", tag: "ops" });
-    expect(jxaCalls[0]?.args).toEqual({ q: "ship", t: "ops", limit: 100, offset: 0 });
-    expect(jxaCalls[0]?.body).toContain('app.toDos.whose({name: {_contains: P.q}})()');
-    expect(jxaCalls[0]?.body).toContain("return tagsOf(t).some(function(tagName)");
-    expect(jxaCalls[0]?.body).toContain("results.slice(start, start + P.limit)");
-  });
-
-  test("allows search callers to page within bounded limits", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () => "[]",
-    });
-
-    await callTool(tools.search.handler, { query: "ship", limit: 25, offset: 50 });
-    expect(jxaCalls[0]?.args).toEqual({ q: "ship", t: null, limit: 25, offset: 50 });
-    expect(() => parseToolInput(tools.search, { query: "ship", limit: 501 })).toThrow();
-  });
-
-  test("uses shared tag fallback logic for tag-only searches", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () => "[]",
-    });
-
-    await callTool(tools.search.handler, { tag: "ops" });
-    expect(jxaCalls[0]?.body).toContain("return tagsOf(t).some(function(tagName)");
-  });
-
-  test("falls back to JXA when the SQLite search fails", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      inspect: () => ({
-        appPath: "/Applications/Things3.app",
-        appPathExists: true,
-        fastReadsEnabled: true,
-        dbPath: "/missing/Things.sqlite",
-      }),
-      jxa: async () => '[{"id":"todo-1","kind":"todo","name":"Fallback"}]',
-    });
-
-    const result = await callTool(tools.search.handler, { query: "Fallback" });
-
-    expect(isError(result)).toBeFalse();
-    expect(textOf(result)).toContain('"Fallback"');
-    expect(jxaCalls).toHaveLength(1);
-  });
-
-  test("returns search errors from jxa", async () => {
-    const { tools } = createMockApp({
-      jxa: async () => {
-        throw new Error("search failed");
-      },
-    });
-
-    const result = await callTool(tools.search.handler, { query: "ship" });
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("search failed");
-  });
-});
-
-describe("add_todo", () => {
-  test("exposes strict date validation", () => {
-    const { tools } = createMockApp();
-    expect(() => parseToolInput(tools.add_todo, { title: "x", when: "later" })).toThrow();
-    expect(() => parseToolInput(tools.add_todo, { title: "x", deadline: "2026-4-1" })).toThrow();
-    expect(() => parseToolInput(tools.add_todo, { title: "x", deadline: "2026-99-99" })).toThrow();
-    expect(() => parseToolInput(tools.add_todo, { title: "x", when: "2026-04-01" })).not.toThrow();
-  });
-
-  test("creates a todo without fallback when only jxa features are used", async () => {
-    const { tools, jxaCalls, quietCalls, quietJsonCalls } = createMockApp({
-      jxa: async () => '{"id":"todo-1","name":"Draft","status":"open"}',
-    });
-
-    const result = await callTool(tools.add_todo.handler, { title: "Draft", list: "Roadmap" });
-    expect(textOf(result)).toBe('{"id":"todo-1","name":"Draft","status":"open"}');
-    expect(jxaCalls[0]?.body).toContain("project.id();");
-    expect(quietCalls).toHaveLength(0);
-    expect(quietJsonCalls).toHaveLength(0);
-  });
-
-  test("requires auth before special-when, checklist, or comma-tag patching", async () => {
-    const { tools, jxaCalls } = createMockApp({ token: "" });
-    const result = await callTool(tools.add_todo.handler, {
-      title: "Draft",
-      tags: ["ops,urgent"],
-    });
-
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("THINGS_AUTH_TOKEN is required for this operation");
-    expect(jxaCalls).toHaveLength(0);
-  });
-
-  test("applies json fallback and re-reads the created todo", async () => {
-    let callIndex = 0;
-    const { tools, jxaCalls, quietJsonCalls } = createMockApp({
-      jxa: async () => {
-        callIndex += 1;
-        return callIndex === 1
-          ? '{"id":"todo-1","name":"Draft","status":"open"}'
-          : '{"id":"todo-1","name":"Draft","checklistItems":[{"name":"A","done":false}]}';
-      },
-    });
-
-    const result = await callTool(tools.add_todo.handler, {
-      title: "Draft",
-      when: "someday",
-      checklist_items: ["A"],
-    });
-
-    expect(textOf(result)).toContain('"checklistItems"');
-    expect(quietJsonCalls).toEqual([
-      {
-        operations: [
-          {
-            type: "to-do",
-            operation: "update",
-            id: "todo-1",
-            attributes: {
-              when: "someday",
-              "checklist-items": [
-                {
-                  type: "checklist-item",
-                  attributes: { title: "A" },
-                },
-              ],
-            },
-          },
-        ],
-        reveal: undefined,
-      },
-    ]);
-    expect(jxaCalls).toHaveLength(2);
-  });
-});
-
-describe("add_project", () => {
-  test("creates a project and validates the target area lookup in jxa", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () => '{"id":"proj-1","name":"Launch","status":"open"}',
-    });
-
-    await callTool(tools.add_project.handler, {
-      title: "Launch",
-      area: "Work",
-      todos: ["Ship it"],
-    });
-
-    expect(jxaCalls[0]?.body).toContain("area.id();");
-    expect(jxaCalls[0]?.body).toContain("t.project = proj;");
-  });
-
-  test("uses json fallback for special-when project patches and re-reads", async () => {
-    let callIndex = 0;
-    const { tools, quietJsonCalls } = createMockApp({
-      jxa: async () => {
-        callIndex += 1;
-        return callIndex === 1
-          ? '{"id":"proj-1","name":"Launch","status":"open"}'
-          : '{"id":"proj-1","name":"Launch","status":"open","todos":[]}';
-      },
-    });
-
-    const result = await callTool(tools.add_project.handler, {
-      title: "Launch",
-      when: "evening",
-    });
-
-    expect(textOf(result)).toContain('"todos"');
-    expect(quietJsonCalls).toEqual([
-      {
-        operations: [
-          {
-            type: "project",
-            operation: "update",
-            id: "proj-1",
-            attributes: {
-              when: "evening",
-            },
-          },
-        ],
-        reveal: undefined,
-      },
-    ]);
-  });
-
-  test("returns project creation errors", async () => {
-    const { tools } = createMockApp({
-      jxa: async () => {
-        throw new Error("project failed");
-      },
-    });
-
-    const result = await callTool(tools.add_project.handler, { title: "Launch" });
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("project failed");
-  });
-});
-
-describe("update", () => {
-  test("rejects an id-only update before invoking Things", async () => {
-    const { tools, jxaCalls } = createMockApp();
-
-    const result = await callTool(tools.update.handler, { id: "1" });
-
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("Provide at least one field to update");
-    expect(jxaCalls).toHaveLength(0);
-  });
-
-  test("rejects an empty update title before invoking Things", async () => {
-    const { tools, jxaCalls } = createMockApp();
-
-    const result = await callTool(tools.update.handler, { id: "1", title: "" });
-
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("title must not be empty");
-    expect(jxaCalls).toHaveLength(0);
-  });
-
-  test("accepts empty deadline to clear an item", () => {
-    const { tools } = createMockApp();
-    expect(() => parseToolInput(tools.update, { id: "1", deadline: "" })).not.toThrow();
-    expect(() => parseToolInput(tools.update, { id: "1", deadline: "tomorrow" })).toThrow();
-    expect(() => parseToolInput(tools.update, { id: "1", when: "" })).not.toThrow();
-  });
-
-  test("returns the updated item directly when no special fallback is needed", async () => {
-    const { tools, jxaCalls, quietCalls, quietJsonCalls } = createMockApp({
-      jxa: async () => '{"kind":"todo","item":{"id":"1","name":"Updated"}}',
-    });
-
-    const result = await callTool(tools.update.handler, {
-      id: "1",
-      title: "Updated",
-      list: "Roadmap",
-    });
-
-    expect(textOf(result)).toBe('{"id":"1","name":"Updated"}');
-    expect(jxaCalls[0]?.body).toContain('return JSON.stringify({kind: type, item:');
-    expect(jxaCalls[0]?.body).toContain("project.id();");
-    expect(jxaCalls[0]?.body.indexOf("app.projects.byId")).toBeLessThan(
-      jxaCalls[0]?.body.indexOf("app.toDos.byId") ?? -1,
-    );
-    expect(quietCalls).toHaveLength(0);
-    expect(quietJsonCalls).toHaveLength(0);
-  });
-
-  test("uses json for project special-when updates", async () => {
-    let callIndex = 0;
-    const { tools, quietJsonCalls, jxaCalls } = createMockApp({
-      jxa: async () => {
-        callIndex += 1;
-        return callIndex === 1
-          ? '{"kind":"project","item":{"id":"proj-1","name":"Launch"}}'
-          : '{"id":"proj-1","name":"Launch","todos":[]}';
-      },
-    });
-
-    const result = await callTool(tools.update.handler, {
-      id: "proj-1",
-      when: "someday",
-    });
-
-    expect(textOf(result)).toContain('"todos"');
-    expect(quietJsonCalls).toEqual([
-      {
-        operations: [
-          {
-            type: "project",
-            operation: "update",
-            id: "proj-1",
-            attributes: {
-              when: "someday",
-            },
-          },
-        ],
-        reveal: undefined,
-      },
-    ]);
-    expect(jxaCalls).toHaveLength(2);
-  });
-
-  test("sends an empty checklist payload when clearing checklist items", async () => {
-    let callIndex = 0;
-    const { tools, quietJsonCalls } = createMockApp({
-      jxa: async () => {
-        callIndex += 1;
-        return callIndex === 1
-          ? '{"kind":"todo","item":{"id":"1","name":"Updated"}}'
-          : '{"id":"1","name":"Updated","checklistItems":[]}';
-      },
-    });
-
-    const result = await callTool(tools.update.handler, {
-      id: "1",
-      checklist_items: [],
-    });
-
-    expect(textOf(result)).toContain('"checklistItems":[]');
-    expect(quietJsonCalls).toEqual([
-      {
-        operations: [
-          {
-            type: "to-do",
-            operation: "update",
-            id: "1",
-            attributes: {
-              "checklist-items": [],
-            },
-          },
-        ],
-        reveal: undefined,
-      },
-    ]);
-  });
-
-  test("clears when via direct update url", async () => {
-    let callIndex = 0;
-    const { tools, quietCalls } = createMockApp({
-      jxa: async () => {
-        callIndex += 1;
-        return callIndex === 1
-          ? '{"kind":"todo","item":{"id":"1","name":"Updated"}}'
-          : '{"id":"1","name":"Updated","activationDate":null}';
-      },
-    });
-
-    const result = await callTool(tools.update.handler, {
-      id: "1",
-      when: "",
-    });
-
-    expect(textOf(result)).toContain('"activationDate":null');
-    expect(quietCalls).toEqual([
-      {
-        path: "update",
-        params: {
-          "auth-token": "token",
-          id: "1",
-          when: "",
-        },
-      },
-    ]);
-  });
-
-  test("fails before mutating when special fallback lacks auth", async () => {
-    const { tools, jxaCalls } = createMockApp({ token: "" });
-    const result = await callTool(tools.update.handler, {
-      id: "1",
-      when: "anytime",
-    });
-
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("THINGS_AUTH_TOKEN is required for this operation");
-    expect(jxaCalls).toHaveLength(0);
-  });
-});
-
-describe("bulk_update", () => {
-  test("requires auth before bulk json updates", async () => {
-    const { tools, jxaCalls } = createMockApp({ token: "" });
-    const result = await callTool(tools.bulk_update.handler, {
-      ids: ["1"],
-      title: "Updated",
-    });
-
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("THINGS_AUTH_TOKEN is required for this operation");
-    expect(jxaCalls).toHaveLength(0);
-  });
-
-  test("updates many items with one json payload", async () => {
-    const { tools, quietJsonCalls, jxaCalls } = createMockApp({
-      jxa: async () => '[{"id":"1","kind":"todo"},{"id":"2","kind":"project"}]',
-    });
-
-    const result = await callTool(tools.bulk_update.handler, {
-      ids: ["1", "2"],
-      title: "Updated",
-      when: "someday",
-    });
-
-    expect(textOf(result)).toContain('"updated":true');
-    expect(jxaCalls[0]?.body.indexOf("app.projects.byId")).toBeLessThan(
-      jxaCalls[0]?.body.indexOf("app.toDos.byId") ?? -1,
-    );
-    expect(quietJsonCalls).toEqual([
-      {
-        operations: [
-          {
-            type: "to-do",
-            operation: "update",
-            id: "1",
-            attributes: {
-              title: "Updated",
-              when: "someday",
-            },
-          },
-          {
-            type: "project",
-            operation: "update",
-            id: "2",
-            attributes: {
-              title: "Updated",
-              when: "someday",
-            },
-          },
-        ],
-        reveal: undefined,
-      },
-    ]);
-  });
-
-  test("normalizes conflicting terminal states to canceled", async () => {
-    const { tools, quietJsonCalls } = createMockApp({
-      jxa: async () => '[{"id":"1","kind":"todo"}]',
-    });
-
-    await callTool(tools.bulk_update.handler, {
-      ids: ["1"],
-      completed: true,
-      canceled: true,
-    });
-
-    expect(quietJsonCalls).toEqual([
-      {
-        operations: [
-          {
-            type: "to-do",
-            operation: "update",
-            id: "1",
-            attributes: {
-              canceled: true,
-            },
-          },
-        ],
-        reveal: undefined,
-      },
-    ]);
-  });
-});
-
-describe("delete and trash", () => {
-  test("marks destructive tools and requires confirmation for empty_trash", async () => {
-    const { tools, jxaCalls } = createMockApp();
-
-    expect(tools.delete.annotations).toMatchObject({
-      readOnlyHint: false,
-      destructiveHint: true,
-      openWorldHint: false,
-    });
-    expect(tools.empty_trash.annotations).toMatchObject({
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: false,
-      openWorldHint: false,
-    });
-    expect(() => parseToolInput(tools.empty_trash, {})).toThrow();
-
-    const result = await callTool(tools.empty_trash.handler, { confirm: false });
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("Set confirm=true to permanently empty Things Trash");
-    expect(jxaCalls).toHaveLength(0);
-  });
-
-  test("deletes an item by id", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () => '{"id":"1","kind":"todo","deleted":true}',
-    });
-
-    const result = await callTool(tools.delete.handler, { id: "1" });
-    expect(textOf(result)).toBe('{"id":"1","kind":"todo","deleted":true}');
-    expect(jxaCalls[0]?.body).toContain("app.delete(todo);");
-    expect(jxaCalls[0]?.body.indexOf("app.projects.byId")).toBeLessThan(
-      jxaCalls[0]?.body.indexOf("app.toDos.byId") ?? -1,
-    );
-  });
-
-  test("empties trash", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () => '{"emptied":true}',
-    });
-
-    const result = await callTool(tools.empty_trash.handler, { confirm: true });
-    expect(textOf(result)).toBe('{"emptied":true}');
-    expect(jxaCalls[0]?.body).toContain("app.emptyTrash()");
-  });
-});
-
-describe("show", () => {
-  test("requires an id or query", async () => {
-    const { tools } = createMockApp();
-    const result = await callTool(tools.show.handler, {});
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("Provide id or query");
-  });
-
-  test("dispatches a background show url", async () => {
-    const { tools, quietCalls } = createMockApp();
-    const result = await callTool(tools.show.handler, { query: "Launch" });
-    expect(textOf(result)).toBe("Showing: Launch");
-    expect(quietCalls).toEqual([
-      {
-        path: "show",
-        params: {
-          id: undefined,
-          query: "Launch",
-        },
-      },
-    ]);
-  });
-
-  test("returns show errors from quietUrl", async () => {
-    const { tools } = createMockApp({
-      quietUrl: async () => {
-        throw new Error("show failed");
-      },
-    });
-
-    const result = await callTool(tools.show.handler, { id: "1" });
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("show failed");
   });
 });
 
@@ -1636,53 +962,33 @@ describe("markdown renderer", () => {
   });
 });
 
+
 describe("export_markdown", () => {
   test("requires exactly one selector", async () => {
     const { tools } = createMockApp();
-    const result = await callTool(tools.export_markdown.handler, {});
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("Provide exactly one of list, project, area, or id");
+    for (const args of [{}, { list: "today", project: "X" }]) {
+      const result = await callTool(tools.export_markdown, args);
+      expect(isError(result)).toBeTrue();
+      expect(textOf(result)).toBe("Provide exactly one of list, project, area, or id");
+    }
   });
 
-  test("rejects multiple selectors", async () => {
-    const { tools } = createMockApp();
-    const result = await callTool(tools.export_markdown.handler, {
-      list: "today",
-      project: "X",
-    });
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("Provide exactly one of list, project, area, or id");
+  test("renders every selector from SQLite", async () => {
+    const { tools, jxaCalls } = createMockApp({ dbPath });
+
+    const project = textOf(await callTool(tools.export_markdown, { project: "Website" }));
+    expect(project).toContain("## Website");
+    expect(project).toContain("- [ ] Proj todo A #urgent #home");
+    expect(project).toContain("    - [x] Step one");
+
+    expect(textOf(await callTool(tools.export_markdown, { id: "t-pa" }))).toContain("    - [ ] Step two");
+    expect(textOf(await callTool(tools.export_markdown, { area: "Work" }))).toContain("*3 open todos*");
+    expect(textOf(await callTool(tools.export_markdown, { list: "inbox" }))).toBe("# Inbox\n\n- [ ] Inbox item\n");
+    expect(textOf(await callTool(tools.export_markdown, { list: "logbook" }))).toContain("- [x] Logged canceled (canceled)");
+    expect(jxaCalls).toHaveLength(0);
   });
 
-  test("renders a project by name and filters completed todos by default", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () =>
-        JSON.stringify({
-          kind: "project",
-          id: "p1",
-          name: "Launch",
-          status: "open",
-          area: "Engineering",
-          dueDate: null,
-          tags: [],
-          notes: "",
-          todos: [
-            { kind: "todo", id: "t1", name: "Open item", status: "open" },
-            { kind: "todo", id: "t2", name: "Done item", status: "completed" },
-          ],
-        }),
-    });
-
-    const result = await callTool(tools.export_markdown.handler, { project: "Launch" });
-    const text = textOf(result);
-    expect(text).toContain("## Launch");
-    expect(text).toContain("- [ ] Open item");
-    expect(text).not.toContain("Done item");
-    expect(jxaCalls[0]?.body).toContain("app.projects.byName(P.n)");
-    expect(jxaCalls[0]?.body).toContain("toDoChecklistItems");
-  });
-
-  test("renders a project by id with include_completed", async () => {
+  test("filters completed todos unless asked", async () => {
     const { tools } = createMockApp({
       jxa: async () =>
         JSON.stringify({
@@ -1698,280 +1004,77 @@ describe("export_markdown", () => {
         }),
     });
 
-    const result = await callTool(tools.export_markdown.handler, {
-      id: "p1",
-      include_completed: true,
-    });
-    const text = textOf(result);
-    expect(text).toContain("- [ ] Open");
-    expect(text).toContain("- [x] Done");
-    expect(text).toContain("- [x] Killed (canceled)");
+    const open = textOf(await callTool(tools.export_markdown, { id: "p1" }));
+    expect(open).toContain("- [ ] Open");
+    expect(open).not.toContain("Done");
+    const all = textOf(await callTool(tools.export_markdown, { id: "p1", include_completed: true }));
+    expect(all).toContain("- [x] Done");
+    expect(all).toContain("- [x] Killed (canceled)");
   });
 
-  test("renders a bare todo when id resolves to a todo", async () => {
-    const { tools } = createMockApp({
-      jxa: async () =>
-        JSON.stringify({
-          kind: "todo",
-          id: "t1",
-          name: "Standalone",
-          status: "open",
-          checklistItems: [{ name: "sub", done: false }],
-        }),
-    });
-
-    const result = await callTool(tools.export_markdown.handler, { id: "t1" });
-    const text = textOf(result);
-    expect(text).toContain("- [ ] Standalone");
-    expect(text).toContain("    - [ ] sub");
-  });
-
-  test("renders an area with shallow project summaries", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      jxa: async () =>
-        JSON.stringify([
-          { kind: "project", id: "p1", name: "Alpha", status: "open", todoCount: 4 },
-          { kind: "project", id: "p2", name: "Beta", status: "open", todoCount: 1 },
-        ]),
-    });
-
-    const result = await callTool(tools.export_markdown.handler, { area: "Engineering" });
-    const text = textOf(result);
-    expect(text).toContain("# Engineering");
-    expect(text).toContain('project: "Alpha"');
-    expect(text).toContain('project: "Beta"');
-    expect(text).toContain("*4 open todos*");
-    expect(text).toContain("*1 open todo*");
-    expect(jxaCalls[0]?.body).toContain("p.area().name() === target");
-  });
-
-  test("renders a built-in list via fast-read when available", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      fastListRead: async (list) => {
-        expect(list).toBe("logbook");
-        return JSON.stringify([
-          { kind: "todo", id: "t1", name: "Finished", status: "completed" },
-        ]);
-      },
-    });
-
-    const result = await callTool(tools.export_markdown.handler, {
-      list: "logbook",
-      include_completed: true,
-    });
-    const text = textOf(result);
-    expect(text).toContain("# Logbook");
-    expect(text).toContain("- [x] Finished");
-    expect(jxaCalls).toHaveLength(0);
-  });
-
-  test("renders logbook completed items by default", async () => {
-    const { tools } = createMockApp({
-      fastListRead: async () =>
-        JSON.stringify([
-          { kind: "todo", id: "t1", name: "Finished", status: "completed" },
-        ]),
-    });
-
-    const result = await callTool(tools.export_markdown.handler, { list: "logbook" });
-    const text = textOf(result);
-    expect(text).toContain("# Logbook");
-    expect(text).toContain("- [x] Finished");
-  });
-
-  test("renders an empty list with *(empty)*", async () => {
-    const { tools } = createMockApp({
-      jxa: async () => "[]",
-    });
-
-    const result = await callTool(tools.export_markdown.handler, { list: "inbox" });
-    expect(textOf(result)).toBe("# Inbox\n\n*(empty)*\n");
-  });
-
-  test("falls back to JXA for every SQL-backed export selector when SQLite fails", async () => {
-    const cases = [
-      {
-        selector: { id: "todo-1" },
-        response: JSON.stringify({ kind: "todo", id: "todo-1", name: "Fallback", status: "open" }),
-      },
-      {
-        selector: { project: "Launch" },
-        response: JSON.stringify({ kind: "project", id: "project-1", name: "Launch", status: "open", todos: [] }),
-      },
-      { selector: { area: "Work" }, response: "[]" },
-      { selector: { list: "today" }, response: "[]" },
+  test("falls back to JXA with checklists for every selector when SQLite fails", async () => {
+    const cases: Array<[Record<string, unknown>, string, Record<string, unknown>]> = [
+      [{ id: "t1" }, '{"kind":"todo","id":"t1","name":"Solo","status":"open"}', { id: "t1", childChecklists: true }],
+      [{ project: "Launch" }, '{"kind":"project","id":"p1","name":"Launch","status":"open","todos":[]}', { name: "Launch", childChecklists: true }],
+      [{ area: "Work" }, "[]", { name: "Work" }],
+      [{ list: "upcoming" }, "[]", { name: "Upcoming" }],
     ];
-
-    for (const entry of cases) {
-      const { tools, jxaCalls } = createMockApp({
-        inspect: () => ({
-          appPath: "/Applications/Things3.app",
-          appPathExists: true,
-          fastReadsEnabled: true,
-          dbPath: "/missing/Things.sqlite",
-        }),
-        jxa: async () => entry.response,
-      });
-
-      const result = await callTool(tools.export_markdown.handler, entry.selector);
-
+    for (const [args, response, jxaArgs] of cases) {
+      const { tools, jxaCalls } = createMockApp({ dbPath: partialDbPath, jxa: async () => response });
+      const result = await callTool(tools.export_markdown, args);
       expect(isError(result)).toBeFalse();
-      expect(jxaCalls).toHaveLength(1);
+      expect(jxaCalls[0]?.args).toEqual(jxaArgs);
     }
   });
 
-  test("keeps computed-list exports on JXA when auxiliary SQLite helpers fail", async () => {
-    const { tools, jxaCalls } = createMockApp({
-      fastListRead: async () => {
-        throw new Error("database is locked");
-      },
-      sortListItems: () => {
-        throw new Error("database is locked");
-      },
-      jxa: async () => '[{"id":"todo-1","kind":"todo","name":"Fallback","status":"open"}]',
-    });
-
-    const result = await callTool(tools.export_markdown.handler, { list: "anytime" });
-
-    expect(isError(result)).toBeFalse();
-    expect(textOf(result)).toContain("Fallback");
-    expect(jxaCalls).toHaveLength(1);
-  });
-
-  test("surfaces errors from jxa", async () => {
+  test("surfaces errors from JXA", async () => {
     const { tools } = createMockApp({
       jxa: async () => {
-        throw new Error("not found");
+        throw new Error("export failed");
       },
     });
-
-    const result = await callTool(tools.export_markdown.handler, { project: "Missing" });
+    const result = await callTool(tools.export_markdown, { list: "today" });
     expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("not found");
+    expect(textOf(result)).toBe("export failed");
   });
 });
 
 describe("stats", () => {
-  test("defaults to today-today window and returns mocked counts", async () => {
-    const today = new Date();
-    const todayIso = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-
-    const { tools, statsCalls } = createMockApp({
-      statsQuery: async (window) => ({
-        window,
-        completed: 3,
-        canceled: 0,
-        created: 5,
-        overdue: 2,
-        inbox: 4,
-        today: 6,
-      }),
-    });
-
-    const result = await callTool(tools.stats.handler, {});
-    const parsed = JSON.parse(textOf(result)!) as StatsResult;
-    expect(parsed.window).toEqual({ since: todayIso, until: todayIso });
-    expect(parsed.completed).toBe(3);
-    expect(parsed.canceled).toBe(0);
-    expect(parsed.created).toBe(5);
-    expect(parsed.overdue).toBe(2);
-    expect(parsed.inbox).toBe(4);
-    expect(parsed.today).toBe(6);
-    expect(statsCalls).toHaveLength(1);
-    expect(statsCalls[0]?.window).toEqual({ since: todayIso, until: todayIso });
+  test("defaults to a today-only window", async () => {
+    const { tools } = createMockApp({ dbPath });
+    const result = jsonOf(await callTool(tools.stats, {})) as { window: { since: string; until: string }; today: number };
+    expect(result.window.since).toBe(result.window.until);
+    expect(result.today).toBe(7);
   });
 
-  test("passes an explicit window through", async () => {
-    const { tools, statsCalls } = createMockApp({
-      statsQuery: async (window) => ({
-        window,
-        completed: 12,
-        canceled: 1,
-        created: 20,
-        overdue: 0,
-        inbox: 2,
-        today: 3,
-      }),
+  test("defaults since to until and passes an explicit window through", async () => {
+    const { tools } = createMockApp({ dbPath });
+    expect(jsonOf(await callTool(tools.stats, { until: "2026-04-05" }))).toMatchObject({
+      window: { since: "2026-04-05", until: "2026-04-05" },
     });
-
-    const result = await callTool(tools.stats.handler, {
-      since: "2026-04-16",
-      until: "2026-04-22",
+    expect(jsonOf(await callTool(tools.stats, { since: "2000-01-01", until: "2099-12-31" }))).toMatchObject({
+      completed: 3,
+      canceled: 1,
+      inbox: 1,
     });
-    const parsed = JSON.parse(textOf(result)!) as StatsResult;
-    expect(parsed.window).toEqual({ since: "2026-04-16", until: "2026-04-22" });
-    expect(parsed.completed).toBe(12);
-    expect(statsCalls[0]?.window).toEqual({ since: "2026-04-16", until: "2026-04-22" });
-  });
-
-  test("defaults since to until when only until is provided", async () => {
-    const { tools, statsCalls } = createMockApp({
-      statsQuery: async (window) => ({
-        window,
-        completed: 0,
-        canceled: 0,
-        created: 0,
-        overdue: 0,
-        inbox: 0,
-        today: 0,
-      }),
-    });
-
-    await callTool(tools.stats.handler, { until: "2026-04-20" });
-    expect(statsCalls[0]?.window).toEqual({ since: "2026-04-20", until: "2026-04-20" });
   });
 
   test("rejects until < since", async () => {
-    const { tools, statsCalls } = createMockApp();
-    const result = await callTool(tools.stats.handler, {
-      since: "2026-04-22",
-      until: "2026-04-16",
-    });
+    const { tools } = createMockApp({ dbPath });
+    const result = await callTool(tools.stats, { since: "2026-04-05", until: "2026-04-01" });
     expect(isError(result)).toBeTrue();
     expect(textOf(result)).toBe("until must be >= since");
-    expect(statsCalls).toHaveLength(0);
   });
 
-  test("fails explicitly when the database is unavailable", async () => {
-    const { tools } = createMockApp({
-      statsQuery: async () => null,
-    });
-
-    const result = await callTool(tools.stats.handler, {});
+  test("fails clearly without a database", async () => {
+    const { tools } = createMockApp();
+    const result = await callTool(tools.stats, {});
     expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toContain("stats requires THINGS_FAST_READS=1");
-    expect(textOf(result)).toContain("doctor");
+    expect(textOf(result)).toContain("Run doctor");
   });
 
-  test("allows null inbox/today when JXA is unavailable", async () => {
-    const { tools } = createMockApp({
-      statsQuery: async (window) => ({
-        window,
-        completed: 1,
-        canceled: 0,
-        created: 2,
-        overdue: 1,
-        inbox: null,
-        today: null,
-      }),
-    });
-
-    const result = await callTool(tools.stats.handler, {});
-    const parsed = JSON.parse(textOf(result)!) as StatsResult;
-    expect(parsed.inbox).toBeNull();
-    expect(parsed.today).toBeNull();
-    expect(parsed.completed).toBe(1);
-  });
-
-  test("surfaces unexpected statsQuery errors", async () => {
-    const { tools } = createMockApp({
-      statsQuery: async () => {
-        throw new Error("db locked");
-      },
-    });
-
-    const result = await callTool(tools.stats.handler, {});
-    expect(isError(result)).toBeTrue();
-    expect(textOf(result)).toBe("db locked");
+  test("surfaces database errors", async () => {
+    const { tools } = createMockApp({ dbPath: partialDbPath });
+    expect(isError(await callTool(tools.stats, {}))).toBeTrue();
   });
 });

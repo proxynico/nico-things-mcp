@@ -1,721 +1,95 @@
-import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { type MdItem, type MdProject, renderArea, renderItem, renderList, renderProject } from "./markdown";
 import {
-  buildJsonUpdateOperation,
-  COSITAS_SQL_READS,
   deadlineSchema,
   errmsg,
-  fail,
-  LIST_NAMES,
-  THINGS_FAST_READS,
+  isoDayToUnixEnd,
+  isoDayToUnixStart,
+  isSandboxAutomationError,
+  type JsonPatch,
+  jsonUpdate,
+  jsonUpdateAttributes,
   needsJsonTagWrite,
-  normalizeThingsJson,
   normalizeThingsValue,
-  ok,
   requireToken,
-  RuntimeCallOptions,
-  StatsWindow,
-  ThingsRuntime,
+  type RuntimeCallOptions,
+  THINGS_FAST_READS,
+  type ThingsRuntime,
   todayIso,
   updateDeadlineSchema,
   updateWhenSchema,
-  usesSpecialWhen,
+  usesJsonOnlyWhen,
   whenSchema,
 } from "./shared";
-import {
-  MdItem,
-  MdProject,
-  MdRenderOptions,
-  renderArea,
-  renderItem,
-  renderList,
-  renderProject,
-} from "./markdown";
-import { verifyThingsAccess } from "./runtime";
-import * as sqlread from "./sqlread";
+import * as sql from "./sqlread";
+import type { Item, ListName, ReadOptions } from "./sqlread";
 
-// When the SQL-reads spike is enabled and a database is reachable, reads run
-// through the pure-SQLite layer for the paths it covers (no osascript, app
-// stays closed). Computed lists (anytime/upcoming/someday) are not covered and
-// always fall through to the JXA path below.
-function sqlDbPath(runtime: ThingsRuntime): string | null {
-  if (!COSITAS_SQL_READS || !THINGS_FAST_READS) return null;
-  return runtime.inspect().dbPath;
-}
-
-function trySqlRead<T>(dbPath: string | null, read: (path: string) => T): T | undefined {
-  if (!dbPath) return undefined;
-  try {
-    return read(dbPath);
-  } catch {
-    return undefined;
-  }
-}
-
-async function tryFastListRead(
-  runtime: ThingsRuntime,
-  list: string,
-  options: sqlread.SqlReadOptions,
-  callOptions: RuntimeCallOptions,
-): Promise<string | null> {
-  try {
-    return await runtime.fastListRead(list, options, callOptions);
-  } catch {
-    return null;
-  }
-}
-
-function trySortListItems(
-  runtime: ThingsRuntime,
-  list: string,
-  items: Array<Record<string, unknown>>,
-): Array<Record<string, unknown>> {
-  try {
-    return runtime.sortListItems(list, items);
-  } catch {
-    return items;
-  }
-}
-
-const TERMINAL_MARKDOWN_LISTS = new Set(["logbook", "trash"]);
-const DEFAULT_RESULT_LIMIT = 100;
-const MAX_RESULT_LIMIT = 500;
+const DEFAULT_LIMIT = 100;
+const MAX_LIMIT = 500;
 
 const READ_ONLY = { readOnlyHint: true, openWorldHint: false };
-const ADDITIVE_WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
-const MUTATING_WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
-const DESTRUCTIVE_WRITE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
+const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+const DESTRUCTIVE = { ...WRITE, destructiveHint: true };
 
-function requestOptions(extra: { signal?: AbortSignal }): RuntimeCallOptions {
-  return { signal: extra.signal };
+const limitSchema = z.number().int().nonnegative().max(MAX_LIMIT).optional();
+const offsetSchema = z.number().int().nonnegative().optional().describe("Items to skip before returning results");
+
+// JXA fallbacks for when SQLite is unavailable. Helpers such as todoOf live in the runtime prelude.
+const JXA_ITEM = `var item;
+if (P.name != null) {
+  item = app.projects.byName(P.name); item.id();
+} else {
+  try { item = app.projects.byId(P.id); item.id(); }
+  catch(e) { var todo = app.toDos.byId(P.id); todo.id(); return JSON.stringify(withChecklist(todo)); }
 }
+var r = projectOf(item);
+r.todos = item.toDos().map(P.childChecklists ? withChecklist : todoOf);
+return JSON.stringify(r);`;
 
-function defaultLimit(limit: number | undefined): number {
-  return limit ?? DEFAULT_RESULT_LIMIT;
-}
+const JXA_LIST = `var list = app.lists.byName(P.name);
+var items = list.toDos().map(todoOf);
+try { items = items.concat(list.projects().map(projectOf)); } catch(e) {}
+return JSON.stringify(items);`;
 
-// Reads a todo or project by id. childChecklists controls whether a project's
-// child todos carry their checklist items (export_markdown wants them; the
-// default read path does not, to keep payloads small).
-async function readItemJson(
-  runtime: ThingsRuntime,
-  id: string,
-  options: RuntimeCallOptions = {},
-  childChecklists = false,
-): Promise<string> {
-  return normalizeThingsJson(
-    await runtime.jxa(
-      `var withChecklist = function(t) {
-  var r = todoOf(t);
-  try {
-    r.checklistItems = t.toDoChecklistItems().map(function(c) {
-      return {name: c.name(), done: c.status() === "completed"};
-    });
-  } catch(e) {}
-  return r;
-};
-try {
-  var p = app.projects.byId(P.id); p.id();
-  var r = projectOf(p);
-  r.todos = p.toDos().map(P.childChecklists ? withChecklist : todoOf);
-  return JSON.stringify(r);
-} catch(e) {
-  var t = app.toDos.byId(P.id); t.id();
-  return JSON.stringify(withChecklist(t));
-}`,
-      childChecklists ? { id, childChecklists: true } : { id },
-      options,
-    ),
-  );
-}
+const JXA_PROJECT_TODOS = `var p = app.projects.byName(P.name); p.id();
+return JSON.stringify(p.toDos().map(todoOf));`;
 
-function readItemForExport(runtime: ThingsRuntime, id: string, options: RuntimeCallOptions = {}): Promise<string> {
-  return readItemJson(runtime, id, options, true);
-}
-
-async function readProjectForExport(runtime: ThingsRuntime, name: string, options: RuntimeCallOptions = {}): Promise<string> {
-  return normalizeThingsJson(
-    await runtime.jxa(
-      `var withChecklist = function(t) {
-  var r = todoOf(t);
-  try {
-    r.checklistItems = t.toDoChecklistItems().map(function(c) {
-      return {name: c.name(), done: c.status() === "completed"};
-    });
-  } catch(e) {}
-  return r;
-};
-var p = app.projects.byName(P.n); p.id();
-var r = projectOf(p);
-r.todos = p.toDos().map(withChecklist);
-return JSON.stringify(r);`,
-      { n: name },
-      options,
-    ),
-  );
-}
-
-async function readAreaProjectsJson(runtime: ThingsRuntime, name: string, options: RuntimeCallOptions = {}): Promise<string> {
-  return normalizeThingsJson(
-    await runtime.jxa(
-      `var target = P.n;
-var projs = app.projects().filter(function(p) {
+const JXA_AREA_PROJECTS = `return JSON.stringify(app.projects().filter(function(p) {
   if (p.status() !== "open") return false;
-  try { return p.area().name() === target; }
+  try { return p.area().name() === P.name; }
   catch(e) { return false; }
-});
-return JSON.stringify(projs.map(projectOf));`,
-      { n: name },
-      options,
-    ),
-  );
-}
+}).map(projectOf));`;
 
-async function readBuiltinListJson(
-  runtime: ThingsRuntime,
-  list: string,
-  options: {
-    limit?: number;
-    offset?: number;
-    completed_after?: string;
-    completed_before?: string;
-  },
-  callOptions: RuntimeCallOptions = {},
-  skipSqlHelpers = false,
-): Promise<MdItem[]> {
-  if (!skipSqlHelpers) {
-    const fast = await tryFastListRead(runtime, list, options, callOptions);
-    if (fast != null) {
-      return JSON.parse(fast) as MdItem[];
-    }
-  }
+const JXA_PROJECTS = `return JSON.stringify(app.projects().filter(function(p) {
+  return p.status() === "open";
+}).map(projectOf));`;
 
-  const mixed = await runtime.jxa(
-    `var list = app.lists.byName(P.n);
-var todos = list.toDos().map(todoOf);
-var projects = [];
-try { projects = list.projects().map(projectOf); } catch(e) {}
-var items = todos.concat(projects);
-if (P.completedAfter || P.completedBefore) {
-  items = items.filter(function(item) {
-    var stamp = item.completionDate || item.cancellationDate;
-    if (!stamp) return false;
-    var value = new Date(stamp);
-    if (P.completedAfter && value < new Date(P.completedAfter + "T00:00:00")) return false;
-    if (P.completedBefore && value > new Date(P.completedBefore + "T23:59:59")) return false;
-    return true;
-  });
-}
-return JSON.stringify(items);`,
-    {
-      n: LIST_NAMES[list]!,
-      completedAfter: options.completed_after ?? null,
-      completedBefore: options.completed_before ?? null,
-    },
-    callOptions,
-  );
+const JXA_AREAS = `return JSON.stringify(app.areas().map(function(a) { return {id: a.id(), name: a.name()}; }));`;
 
-  const items = JSON.parse(normalizeThingsJson(mixed)) as Array<Record<string, unknown>>;
-  const sorted = skipSqlHelpers ? items as MdItem[] : trySortListItems(runtime, list, items) as MdItem[];
-  const start = options.offset ?? 0;
-  return options.limit != null ? sorted.slice(start, start + options.limit) : sorted.slice(start);
-}
+const JXA_TAGS = `return JSON.stringify(app.tags().map(function(t) { return {id: t.id(), name: t.name()}; }));`;
 
-async function applyQuietUpdate(
-  runtime: ThingsRuntime,
-  kind: "todo" | "project",
-  id: string,
-  params: Record<string, string | undefined>,
-  options: RuntimeCallOptions = {},
-): Promise<void> {
-  requireToken(runtime.token);
-  await runtime.quietUrl(kind === "project" ? "update-project" : "update", {
-    "auth-token": runtime.token,
-    id,
-    ...params,
-  }, options);
-}
-
-async function buildDoctorReport(runtime: ThingsRuntime, options: RuntimeCallOptions = {}): Promise<string> {
-  const inspection = runtime.inspect();
-  const checks: Record<string, Record<string, unknown>> = {};
-  let sqlReadOk = false;
-  let jxaReadOk = false;
-
-  if (!COSITAS_SQL_READS || !inspection.fastReadsEnabled) {
-    checks.sql_read = {
-      ok: false,
-      enabled: false,
-      available: false,
-      db_path: inspection.dbPath,
-      message: "SQLite reads are disabled by configuration",
-    };
-  } else if (!inspection.dbPath) {
-    checks.sql_read = {
-      ok: false,
-      enabled: true,
-      available: false,
-      db_path: null,
-      message: "No Things database found",
-    };
-  } else {
-    try {
-      sqlread.probeSqlRead(inspection.dbPath);
-      sqlReadOk = true;
-      checks.sql_read = {
-        ok: true,
-        enabled: true,
-        available: true,
-        db_path: inspection.dbPath,
-        message: "SQLite reads are available",
-      };
-    } catch (error) {
-      checks.sql_read = {
-        ok: false,
-        enabled: true,
-        available: false,
-        db_path: inspection.dbPath,
-        message: errmsg(error),
-      };
-    }
-  }
-
-  try {
-    await verifyThingsAccess(runtime, options);
-    jxaReadOk = true;
-    checks.jxa_read = {
-      ok: true,
-      app_path: inspection.appPath,
-      message: "JXA reads are available",
-    };
-  } catch (error) {
-    checks.jxa_read = {
-      ok: false,
-      app_path: inspection.appPath,
-      message: errmsg(error),
-    };
-  }
-
-  checks.json_writes = {
-    ok: Boolean(runtime.token),
-    configured: Boolean(runtime.token),
-    message: runtime.token
-      ? "THINGS_AUTH_TOKEN is configured for JSON writes"
-      : "THINGS_AUTH_TOKEN is missing; JSON writes are unavailable",
-  };
-
-  return JSON.stringify({ ok: sqlReadOk || jxaReadOk, checks });
-}
-
-export function registerTools(server: McpServer, runtime: ThingsRuntime): Record<string, RegisteredTool> {
-  const tools: Record<string, RegisteredTool> = {};
-
-  tools.doctor = server.registerTool(
-    "doctor",
-    {
-      description: "Report independent SQLite read, JXA read, and authenticated JSON write capabilities.",
-      inputSchema: {},
-      annotations: READ_ONLY,
-    },
-    async (_params, extra) => {
-      const options = requestOptions(extra);
-      try {
-        return ok(await buildDoctorReport(runtime, options));
-      } catch (error) {
-        return fail(errmsg(error));
-      }
-    },
-  );
-
-  tools.read = server.registerTool(
-    "read",
-    {
-      description: "Read from Things 3. Returns JSON with full item details including IDs.",
-      inputSchema: {
-      list: z
-        .enum([
-          "inbox",
-          "today",
-          "anytime",
-          "upcoming",
-          "someday",
-          "logbook",
-          "trash",
-          "projects",
-          "areas",
-          "tags",
-        ])
-        .optional()
-        .describe("Built-in list, or 'projects'/'areas'/'tags' to list all"),
-      project: z
-        .string()
-        .optional()
-        .describe("Project name — returns its todos"),
-      area: z
-        .string()
-        .optional()
-        .describe("Area name — returns its projects"),
-      id: z
-        .string()
-        .optional()
-        .describe("Todo or project ID — returns full detail with checklist/child todos"),
-      limit: z.number().int().nonnegative().max(MAX_RESULT_LIMIT).optional().describe("Max items to return"),
-      offset: z.number().int().nonnegative().optional().describe("Items to skip before returning results"),
-      completed_after: deadlineSchema.optional().describe("Only return items completed/canceled on or after yyyy-mm-dd"),
-      completed_before: deadlineSchema.optional().describe("Only return items completed/canceled on or before yyyy-mm-dd"),
-      },
-      annotations: READ_ONLY,
-    },
-    async ({ list, project, area, id, limit, offset, completed_after, completed_before }, extra) => {
-      const selectors = [list, project, area, id].filter((value) => value != null);
-      if (selectors.length !== 1) {
-        return fail("Provide exactly one of list, project, area, or id");
-      }
-      const options = requestOptions(extra);
-      const db = sqlDbPath(runtime);
-
-      try {
-        if (list === "projects") {
-          const projects = trySqlRead(db, sqlread.listProjects);
-          if (projects !== undefined) return ok(JSON.stringify(projects));
-          return ok(
-            normalizeThingsJson(
-              await runtime.jxa(
-              `return JSON.stringify(app.projects().filter(function(p){
-  return p.status()==="open";
-}).map(projectOf));`,
-                undefined,
-                options,
-            ),
-            ),
-          );
-        }
-
-        if (list === "areas") {
-          const areas = trySqlRead(db, sqlread.listAreas);
-          if (areas !== undefined) return ok(JSON.stringify(areas));
-          return ok(
-            await runtime.jxa(
-              `return JSON.stringify(app.areas().map(function(a){
-return {id:a.id(), name:a.name()};
-}));`,
-              undefined,
-              options,
-            ),
-          );
-        }
-
-        if (list === "tags") {
-          const tags = trySqlRead(db, sqlread.listTags);
-          if (tags !== undefined) return ok(JSON.stringify(tags));
-          return ok(
-            await runtime.jxa(
-              `return JSON.stringify(app.tags().map(function(t){
-return {id:t.id(), name:t.name()};
-}));`,
-              undefined,
-              options,
-            ),
-          );
-        }
-
-        if (id) {
-          const item = trySqlRead(db, (path) => sqlread.readById(path, id));
-          if (item) return ok(JSON.stringify(item));
-          return ok(await readItemJson(runtime, id, options));
-        }
-
-        if (project) {
-          const todos = trySqlRead(db, (path) =>
-            sqlread.readProjectTodos(path, project, {
-              limit: limit ?? undefined,
-              offset: offset ?? 0,
-              completed_after,
-              completed_before,
-            }),
-          );
-          if (todos != null) return ok(JSON.stringify(todos));
-          return ok(
-            normalizeThingsJson(
-              await runtime.jxa(
-              `var p = app.projects.byName(P.n); p.id();
-return JSON.stringify(applyReadWindow(p.toDos()).map(todoOf));`,
-              {
-                n: project,
-                limit: limit ?? null,
-                offset: offset ?? 0,
-                completedAfter: completed_after ?? null,
-                completedBefore: completed_before ?? null,
-              },
-              options,
-            ),
-            ),
-          );
-        }
-
-        if (area) {
-          const projects = trySqlRead(db, (path) => sqlread.readAreaProjects(path, area));
-          if (projects !== undefined) return ok(JSON.stringify(projects));
-          return ok(await readAreaProjectsJson(runtime, area, options));
-        }
-
-        const pageLimit = defaultLimit(limit);
-        const pageOffset = offset ?? 0;
-        if (db && sqlread.SQL_SUPPORTED_LISTS.has(list!)) {
-          const items = trySqlRead(db, (path) =>
-            sqlread.readList(path, list!, {
-              limit: pageLimit,
-              offset: pageOffset,
-              completed_after,
-              completed_before,
-            }),
-          );
-          if (items !== undefined) return ok(JSON.stringify(items));
-          return ok(JSON.stringify(await readBuiltinListJson(runtime, list!, {
-            limit: pageLimit,
-            offset: pageOffset,
-            completed_after,
-            completed_before,
-          }, options, true)));
-        }
-        const fast = await tryFastListRead(runtime, list!, {
-          limit: pageLimit,
-          offset: pageOffset,
-          completed_after,
-          completed_before,
-        }, options);
-        if (fast != null) {
-          return ok(fast);
-        }
-
-        const mixed = await runtime.jxa(
-          `var list = app.lists.byName(P.n);
-var todos = list.toDos().map(todoOf);
-var projects = [];
-try { projects = list.projects().map(projectOf); } catch(e) {}
-var items = todos.concat(projects);
-if (P.completedAfter || P.completedBefore) {
-  items = items.filter(function(item) {
-    var stamp = item.completionDate || item.cancellationDate;
-    if (!stamp) return false;
-    var value = new Date(stamp);
-    if (P.completedAfter && value < new Date(P.completedAfter + "T00:00:00")) return false;
-    if (P.completedBefore && value > new Date(P.completedBefore + "T23:59:59")) return false;
-    return true;
-  });
-}
-return JSON.stringify(items);`,
-          {
-            n: LIST_NAMES[list!],
-            completedAfter: completed_after ?? null,
-            completedBefore: completed_before ?? null,
-          },
-          options,
-        );
-
-        const sorted = trySortListItems(
-          runtime,
-          list!,
-          JSON.parse(normalizeThingsJson(mixed)) as Array<Record<string, unknown>>,
-        );
-        const start = pageOffset;
-        const paged = sorted.slice(start, start + pageLimit);
-        return ok(JSON.stringify(paged));
-      } catch (error) {
-        return fail(errmsg(error));
-      }
-    },
-  );
-
-  tools.search = server.registerTool(
-    "search",
-    {
-      description: "Search Things 3 open todos by name or tag. Returns JSON.",
-      inputSchema: {
-      query: z.string().optional().describe("Text to search in todo names"),
-      tag: z.string().optional().describe("Tag name to filter by"),
-      limit: z.number().int().nonnegative().max(MAX_RESULT_LIMIT).optional().describe("Max items to return"),
-      offset: z.number().int().nonnegative().optional().describe("Items to skip before returning results"),
-      },
-      annotations: READ_ONLY,
-    },
-    async ({ query, tag, limit, offset }, extra) => {
-      if (!query && !tag) return fail("Provide query or tag");
-      const options = requestOptions(extra);
-      const pageLimit = defaultLimit(limit);
-      const pageOffset = offset ?? 0;
-      try {
-        const db = sqlDbPath(runtime);
-        const sqlResults = trySqlRead(db, (path) =>
-          sqlread.search(path, { query, tag, limit: pageLimit, offset: pageOffset }),
-        );
-        if (sqlResults !== undefined) {
-          return ok(
-            JSON.stringify(sqlResults),
-          );
-        }
-        return ok(
-          normalizeThingsJson(
-            await runtime.jxa(
-            `var results = P.q ? app.toDos.whose({name: {_contains: P.q}})() : app.toDos();
+const JXA_SEARCH = `var results = P.query ? app.toDos.whose({name: {_contains: P.query}})() : app.toDos();
 results = results.filter(function(t) { return t.status() === "open"; });
-if (P.t) {
+if (P.tag) {
   results = results.filter(function(t) {
-    return tagsOf(t).some(function(tagName) { return tagName === P.t; });
+    return tagsOf(t).some(function(tagName) { return tagName === P.tag; });
   });
 }
-var start = P.offset || 0;
-results = P.limit == null ? results.slice(start) : results.slice(start, start + P.limit);
-return JSON.stringify(results.map(todoOf));`,
-            { q: query ?? null, t: tag ?? null, limit: pageLimit, offset: pageOffset },
-            options,
-          ),
-          ),
-        );
-      } catch (error) {
-        return fail(errmsg(error));
-      }
-    },
-  );
+return JSON.stringify(results.slice(P.offset, P.offset + P.limit).map(todoOf));`;
 
-  tools.export_markdown = server.registerTool(
-    "export_markdown",
-    {
-      description: "Export Things items as clean markdown for pasting into notes. Returns raw markdown text, not JSON.",
-      inputSchema: {
-      list: z
-        .enum(["inbox", "today", "anytime", "upcoming", "someday", "logbook", "trash"])
-        .optional()
-        .describe("Built-in list to render as markdown"),
-      project: z.string().optional().describe("Project name — renders its todos"),
-      area: z.string().optional().describe("Area name — renders shallow per-project summaries"),
-      id: z.string().optional().describe("Todo or project ID — renders detail"),
-      include_notes: z.boolean().optional().describe("Include notes in the output (default true)"),
-      include_completed: z.boolean().optional().describe("Include completed and canceled items (default false)"),
-      limit: z.number().int().nonnegative().max(MAX_RESULT_LIMIT).optional().describe("Max items to return for list reads"),
-      offset: z.number().int().nonnegative().optional().describe("Items to skip before returning results for list reads"),
-      completed_after: deadlineSchema.optional().describe("For list reads: only include items completed/canceled on or after yyyy-mm-dd"),
-      completed_before: deadlineSchema.optional().describe("For list reads: only include items completed/canceled on or before yyyy-mm-dd"),
-      },
-      annotations: READ_ONLY,
-    },
-    async ({ list, project, area, id, include_notes, include_completed, limit, offset, completed_after, completed_before }, extra) => {
-      const selectors = [list, project, area, id].filter((value) => value != null);
-      if (selectors.length !== 1) {
-        return fail("Provide exactly one of list, project, area, or id");
-      }
-      const options = requestOptions(extra);
+// Projects first: Things also resolves a project id as a todo.
+const JXA_KINDS = `return JSON.stringify(P.ids.map(function(id) {
+  try {
+    var project = app.projects.byId(id); project.id();
+    return {id: id, kind: "project"};
+  } catch(e) {
+    var todo = app.toDos.byId(id); todo.id();
+    return {id: id, kind: "todo"};
+  }
+}));`;
 
-      const opts: MdRenderOptions = {
-        includeNotes: include_notes ?? true,
-        includeCompleted: include_completed ?? (list != null && TERMINAL_MARKDOWN_LISTS.has(list)),
-      };
-      const db = sqlDbPath(runtime);
-
-      try {
-        if (id) {
-          const item = trySqlRead(db, (path) => sqlread.readItemForExport(path, id));
-          if (item) return ok(renderItem(item as MdItem, opts));
-          const jxaItem = JSON.parse(await readItemForExport(runtime, id, options)) as MdItem;
-          return ok(renderItem(jxaItem, opts));
-        }
-
-        if (project) {
-          const proj = trySqlRead(db, (path) => sqlread.readProjectForExport(path, project));
-          if (proj) return ok(renderProject(proj as MdProject, opts));
-          const jxaProject = JSON.parse(await readProjectForExport(runtime, project, options)) as MdProject;
-          return ok(renderProject(jxaProject, opts));
-        }
-
-        if (area) {
-          const projects = trySqlRead(db, (path) => sqlread.readAreaProjects(path, area));
-          if (projects !== undefined) return ok(renderArea(area, projects as MdProject[], opts));
-          const jxaProjects = JSON.parse(await readAreaProjectsJson(runtime, area, options)) as MdProject[];
-          return ok(renderArea(area, jxaProjects, opts));
-        }
-
-        const listOptions = {
-          limit: defaultLimit(limit),
-          offset: offset ?? 0,
-          completed_after,
-          completed_before,
-        };
-        const sqlAttempted = db != null && sqlread.SQL_SUPPORTED_LISTS.has(list!);
-        const sqlItems = sqlAttempted
-          ? trySqlRead(db, (path) => sqlread.readList(path, list!, listOptions) as MdItem[])
-          : undefined;
-        const items = sqlItems ?? await readBuiltinListJson(runtime, list!, listOptions, options, sqlAttempted);
-        return ok(renderList(list!, items, opts));
-      } catch (error) {
-        return fail(errmsg(error));
-      }
-    },
-  );
-
-  tools.stats = server.registerTool(
-    "stats",
-    {
-      description: "Return Things counts: windowed (completed, canceled, created) and snapshot (overdue, inbox, today). SQL-first; requires THINGS_FAST_READS=1 and a reachable Things database. Windows use local-time calendar days.",
-      inputSchema: {
-      since: deadlineSchema.optional().describe("yyyy-mm-dd (default: until)"),
-      until: deadlineSchema.optional().describe("yyyy-mm-dd (default: today, local time)"),
-      },
-      annotations: READ_ONLY,
-    },
-    async ({ since, until }, extra) => {
-      const options = requestOptions(extra);
-      const windowUntil = until ?? todayIso();
-      const windowSince = since ?? windowUntil;
-
-      if (windowSince > windowUntil) {
-        return fail("until must be >= since");
-      }
-
-      const window: StatsWindow = { since: windowSince, until: windowUntil };
-
-      try {
-        const result = await runtime.statsQuery(window, options);
-        if (result == null) {
-          return fail(
-            "stats requires THINGS_FAST_READS=1 and a reachable Things database. Run 'doctor' for diagnostics.",
-          );
-        }
-        return ok(JSON.stringify(result));
-      } catch (error) {
-        return fail(errmsg(error));
-      }
-    },
-  );
-
-  tools.add_todo = server.registerTool(
-    "add_todo",
-    {
-      description: "Create a todo in Things 3. Returns the created item with its ID.",
-      inputSchema: {
-      title: z.string(),
-      notes: z.string().optional(),
-      when: whenSchema
-        .optional()
-        .describe("today | tomorrow | evening | anytime | someday | yyyy-mm-dd"),
-      deadline: deadlineSchema.optional().describe("yyyy-mm-dd"),
-      tags: z.array(z.string()).optional(),
-      list: z.string().optional().describe("Project name to add the todo to"),
-      checklist_items: z.array(z.string()).optional(),
-      },
-      annotations: ADDITIVE_WRITE,
-    },
-    async (params, extra) => {
-      const options = requestOptions(extra);
-      try {
-        const specialWhen = usesSpecialWhen(params.when) ? params.when : undefined;
-        const tagsNeedJson = needsJsonTagWrite(params.tags);
-        const needsJsonPatch = specialWhen != null || params.checklist_items?.length || tagsNeedJson;
-        if (needsJsonPatch) {
-          requireToken(runtime.token);
-        }
-
-        const result = await runtime.jxa(
-          `var props = {name: P.title};
+const JXA_ADD_TODO = `var props = {name: P.title};
 if (P.notes) props.notes = P.notes;
 if (P.tags && P.tags.length && !P.tagsNeedJson) props.tagNames = P.tags.join(", ");
 if (P.deadline) props.dueDate = new Date(P.deadline + "T12:00:00");
@@ -726,61 +100,9 @@ if (P.list) {
   todo.project = project;
 }
 scheduleWhen(todo, P.when);
-return JSON.stringify({id: todo.id(), name: todo.name(), status: todo.status()});`,
-          {
-            ...params,
-            tagsNeedJson,
-          },
-          options,
-        );
+return JSON.stringify({id: todo.id(), name: todo.name(), status: todo.status()});`;
 
-        const created = JSON.parse(result) as { id: string };
-        const operation = buildJsonUpdateOperation("todo", created.id, {
-          when: specialWhen,
-          tags: tagsNeedJson ? params.tags : undefined,
-          checklist_items: params.checklist_items,
-        });
-        if (operation) {
-          await runtime.quietJson([operation], undefined, options);
-          return ok(await readItemJson(runtime, created.id, options));
-        }
-
-        return ok(result);
-      } catch (error) {
-        return fail(errmsg(error));
-      }
-    },
-  );
-
-  tools.add_project = server.registerTool(
-    "add_project",
-    {
-      description: "Create a project in Things 3 with optional child todos. Returns the created project with ID.",
-      inputSchema: {
-      title: z.string(),
-      notes: z.string().optional(),
-      when: whenSchema
-        .optional()
-        .describe("today | tomorrow | evening | anytime | someday | yyyy-mm-dd"),
-      deadline: deadlineSchema.optional().describe("yyyy-mm-dd"),
-      tags: z.array(z.string()).optional(),
-      area: z.string().optional().describe("Area name"),
-      todos: z.array(z.string()).optional().describe("Child todo titles"),
-      },
-      annotations: ADDITIVE_WRITE,
-    },
-    async (params, extra) => {
-      const options = requestOptions(extra);
-      try {
-        const specialWhen = usesSpecialWhen(params.when) ? params.when : undefined;
-        const tagsNeedJson = needsJsonTagWrite(params.tags);
-        const needsJsonPatch = specialWhen != null || tagsNeedJson;
-        if (needsJsonPatch) {
-          requireToken(runtime.token);
-        }
-
-        const result = await runtime.jxa(
-          `var props = {name: P.title};
+const JXA_ADD_PROJECT = `var props = {name: P.title};
 if (P.notes) props.notes = P.notes;
 if (P.tags && P.tags.length && !P.tagsNeedJson) props.tagNames = P.tags.join(", ");
 if (P.deadline) props.dueDate = new Date(P.deadline + "T12:00:00");
@@ -790,97 +112,20 @@ if (P.area) {
   area.id();
   proj.area = area;
 }
-if (P.todos && P.todos.length) {
-  for (var i = 0; i < P.todos.length; i++) {
-    var t = app.make({new: "toDo", withProperties: {name: P.todos[i]}});
-    t.project = proj;
-  }
-}
+(P.todos || []).forEach(function(title) {
+  var t = app.make({new: "toDo", withProperties: {name: title}});
+  t.project = proj;
+});
 scheduleWhen(proj, P.when);
-return JSON.stringify({id: proj.id(), name: proj.name(), status: proj.status()});`,
-          {
-            ...params,
-            tagsNeedJson,
-          },
-          options,
-        );
+return JSON.stringify({id: proj.id(), name: proj.name(), status: proj.status()});`;
 
-        const created = JSON.parse(result) as { id: string };
-        const operation = buildJsonUpdateOperation("project", created.id, {
-          when: specialWhen,
-          tags: tagsNeedJson ? params.tags : undefined,
-        });
-        if (operation) {
-          await runtime.quietJson([operation], undefined, options);
-          return ok(await readItemJson(runtime, created.id, options));
-        }
-
-        return ok(result);
-      } catch (error) {
-        return fail(errmsg(error));
-      }
-    },
-  );
-
-  tools.update = server.registerTool(
-    "update",
-    {
-      description: "Update a todo or project in Things 3 by ID. Detects item type automatically.",
-      inputSchema: {
-      id: z.string().describe("Todo or project ID"),
-      title: z.string().optional(),
-      notes: z.string().optional().describe("Replace notes (use empty string to clear)"),
-      when: updateWhenSchema
-        .optional()
-        .describe("today | tomorrow | evening | anytime | someday | yyyy-mm-dd | empty string to clear"),
-      deadline: updateDeadlineSchema.optional().describe("yyyy-mm-dd (empty string to clear)"),
-      tags: z.array(z.string()).optional().describe("Replace all tags"),
-      checklist_items: z.array(z.string()).optional().describe("Replace all checklist items"),
-      completed: z.boolean().optional(),
-      canceled: z.boolean().optional(),
-      list: z
-        .string()
-        .optional()
-        .describe("Move to project (todos) or area (projects) by name"),
-      },
-      annotations: MUTATING_WRITE,
-    },
-    async (params, extra) => {
-      const updateFields = [
-        params.title,
-        params.notes,
-        params.when,
-        params.deadline,
-        params.tags,
-        params.checklist_items,
-        params.completed,
-        params.canceled,
-        params.list,
-      ];
-      if (!updateFields.some((value) => value !== undefined)) {
-        return fail("Provide at least one field to update");
-      }
-      if (params.title === "") {
-        return fail("title must not be empty");
-      }
-      const options = requestOptions(extra);
-      try {
-        const specialWhen = usesSpecialWhen(params.when) ? params.when : undefined;
-        const tagsNeedJson = needsJsonTagWrite(params.tags);
-        const needsUrlWhenClear = params.when === "";
-        const needsJsonPatch = specialWhen != null || params.checklist_items != null || tagsNeedJson;
-        if (needsUrlWhenClear || needsJsonPatch) {
-          requireToken(runtime.token);
-        }
-
-        const result = await runtime.jxa(
-          `var item, type;
+const JXA_UPDATE = `var item, type;
 try { item = app.projects.byId(P.id); item.id(); type = "project"; }
 catch(e) { item = app.toDos.byId(P.id); item.id(); type = "todo"; }
-if (P.hasOwnProperty("title") && P.title) item.name = P.title;
+if (P.title) item.name = P.title;
 if (P.hasOwnProperty("notes")) item.notes = P.notes || "";
 if (P.hasOwnProperty("tags") && !P.tagsNeedJson) item.tagNames = P.tags ? P.tags.join(", ") : "";
-if (P.hasOwnProperty("deadline")) item.dueDate = P.deadline ? new Date(P.deadline + "T12:00:00") : null;
+if (P.deadline) item.dueDate = new Date(P.deadline + "T12:00:00");
 if (P.list) {
   if (type === "todo") {
     var project = app.projects.byName(P.list);
@@ -896,39 +141,428 @@ scheduleWhen(item, P.when);
 if (P.canceled) item.status = "canceled";
 else if (P.completed) item.status = "completed";
 else if (P.completed === false || P.canceled === false) item.status = "open";
-return JSON.stringify({kind: type, item: type === "todo" ? todoOf(item) : projectOf(item)});`,
-          {
-            ...params,
-            tagsNeedJson,
-          },
-          options,
-        );
+return JSON.stringify({kind: type, item: type === "todo" ? todoOf(item) : projectOf(item)});`;
 
-        const parsed = JSON.parse(result) as {
-          kind: "todo" | "project";
-          item: unknown;
-        };
+const JXA_DELETE = `var kind, item;
+try { item = app.projects.byId(P.id); item.id(); kind = "project"; }
+catch(e1) {
+  try { item = app.toDos.byId(P.id); item.id(); kind = "todo"; }
+  catch(e2) { item = app.areas.byId(P.id); item.id(); kind = "area"; }
+}
+// Things only deletes a completed or canceled item through the Logbook.
+try { app.delete(item); }
+catch(e) {
+  if (kind === "area") throw e;
+  app.delete(app.lists.byName("Logbook").toDos.byId(P.id));
+}
+return JSON.stringify({id: P.id, kind: kind, deleted: true});`;
 
-        if (needsUrlWhenClear) {
-          await applyQuietUpdate(runtime, parsed.kind, params.id, { when: "" }, options);
-          return ok(await readItemJson(runtime, params.id, options));
-        }
+type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: true };
 
-        const operation = buildJsonUpdateOperation(parsed.kind, params.id, {
-          tags: tagsNeedJson ? params.tags : undefined,
-          when: specialWhen,
-          checklist_items: params.checklist_items,
-        });
-        if (operation) {
-          await runtime.quietJson([operation], undefined, options);
-          return ok(await readItemJson(runtime, params.id, options));
-        }
+// Wraps a tool body: its text becomes the result, and anything it throws becomes an error result.
+function tool<A>(body: (args: A, options: RuntimeCallOptions) => Promise<string>) {
+  return async (args: A, extra: RuntimeCallOptions): Promise<ToolResult> => {
+    try {
+      return { content: [{ type: "text", text: await body(args, { signal: extra.signal }) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: errmsg(error) }], isError: true };
+    }
+  };
+}
 
-        return ok(JSON.stringify(normalizeThingsValue(parsed.item)));
-      } catch (error) {
-        return fail(errmsg(error));
-      }
+function requireOneSelector(...selectors: unknown[]): void {
+  if (selectors.filter((value) => value != null).length !== 1) {
+    throw new Error("Provide exactly one of list, project, area, or id");
+  }
+}
+
+// SQLite answers when it can; a failure or a miss falls back to asking Things over JXA.
+async function sqlFirst<T>(
+  runtime: ThingsRuntime,
+  fromSql: (dbPath: string) => T | null,
+  fromJxa: () => Promise<T>,
+): Promise<T> {
+  if (runtime.dbPath) {
+    try {
+      const result = fromSql(runtime.dbPath);
+      if (result != null) return result;
+    } catch {
+      // Fall through to JXA.
+    }
+  }
+  return fromJxa();
+}
+
+async function jxaRead<T>(
+  runtime: ThingsRuntime,
+  body: string,
+  args: Record<string, unknown> | undefined,
+  options: RuntimeCallOptions,
+): Promise<T> {
+  return normalizeThingsValue(JSON.parse(await runtime.jxa(body, args, options))) as T;
+}
+
+// Applies the completion window and paging to items JXA returned whole.
+function page(items: Item[], { limit, offset = 0, completed_after, completed_before }: ReadOptions): Item[] {
+  let windowed = items;
+  if (completed_after || completed_before) {
+    const after = completed_after ? isoDayToUnixStart(completed_after) * 1000 : -Infinity;
+    const before = completed_before ? isoDayToUnixEnd(completed_before) * 1000 : Infinity;
+    windowed = items.filter((item) => {
+      const stamp = Date.parse(String(item.completionDate ?? item.cancellationDate));
+      return stamp >= after && stamp <= before;
+    });
+  }
+  return windowed.slice(offset, limit == null ? undefined : offset + limit);
+}
+
+function readItem(runtime: ThingsRuntime, id: string, childChecklists: boolean, options: RuntimeCallOptions) {
+  return sqlFirst(
+    runtime,
+    (db) => sql.readItem(db, id, childChecklists),
+    () => jxaRead<Item>(runtime, JXA_ITEM, { id, childChecklists }, options),
+  );
+}
+
+function readList(runtime: ThingsRuntime, list: ListName, readOptions: ReadOptions, options: RuntimeCallOptions) {
+  return sqlFirst(
+    runtime,
+    (db) => sql.readList(db, list, readOptions),
+    async () => {
+      const name = list.charAt(0).toUpperCase() + list.slice(1);
+      return page(await jxaRead<Item[]>(runtime, JXA_LIST, { name }, options), readOptions);
     },
+  );
+}
+
+function readAreaProjects(runtime: ThingsRuntime, area: string, options: RuntimeCallOptions) {
+  return sqlFirst(
+    runtime,
+    (db) => sql.readAreaProjects(db, area),
+    () => jxaRead<Item[]>(runtime, JXA_AREA_PROJECTS, { name: area }, options),
+  );
+}
+
+// Applies a JSON update to an item JXA just created or changed, then returns the item as Things now has it.
+async function patchAndReread(
+  runtime: ThingsRuntime,
+  kind: "todo" | "project",
+  id: string,
+  attributes: Record<string, unknown>,
+  options: RuntimeCallOptions,
+): Promise<string> {
+  await runtime.quietJson([jsonUpdate(kind, id, attributes)], options);
+  return JSON.stringify(await jxaRead<Item>(runtime, JXA_ITEM, { id }, options));
+}
+
+async function doctorReport(runtime: ThingsRuntime, options: RuntimeCallOptions) {
+  const db_path = runtime.dbPath;
+  let sqlRead: { ok: boolean; db_path: string | null; message: string };
+  if (!db_path) {
+    sqlRead = {
+      ok: false,
+      db_path,
+      message: THINGS_FAST_READS ? "No Things database found" : "SQLite reads are off (THINGS_FAST_READS=0)",
+    };
+  } else {
+    try {
+      sql.probe(db_path);
+      sqlRead = { ok: true, db_path, message: "SQLite reads are available" };
+    } catch (error) {
+      sqlRead = { ok: false, db_path, message: errmsg(error) };
+    }
+  }
+
+  let jxaRead: { ok: boolean; app_path: string; message: string };
+  try {
+    await runtime.jxa("return JSON.stringify(app.lists().map(function(list) { return list.name(); }));", undefined, options);
+    jxaRead = { ok: true, app_path: runtime.appPath, message: "JXA reads are available" };
+  } catch (error) {
+    jxaRead = {
+      ok: false,
+      app_path: runtime.appPath,
+      message: isSandboxAutomationError(error)
+        ? "Things automation is blocked by the current sandbox. Run the server outside the sandbox."
+        : `Things startup check failed: ${errmsg(error)}`,
+    };
+  }
+
+  const json_writes = runtime.token
+    ? { ok: true, message: "THINGS_AUTH_TOKEN is configured for JSON writes" }
+    : { ok: false, message: "THINGS_AUTH_TOKEN is missing; JSON writes are unavailable" };
+
+  return { ok: sqlRead.ok || jxaRead.ok, checks: { sql_read: sqlRead, jxa_read: jxaRead, json_writes } };
+}
+
+export function registerTools(server: McpServer, runtime: ThingsRuntime): Record<string, RegisteredTool> {
+  const tools: Record<string, RegisteredTool> = {};
+
+  tools.doctor = server.registerTool(
+    "doctor",
+    {
+      description: "Report independent SQLite read, JXA read, and authenticated JSON write capabilities.",
+      inputSchema: {},
+      annotations: READ_ONLY,
+    },
+    tool(async (_args, options) => JSON.stringify(await doctorReport(runtime, options))),
+  );
+
+  tools.read = server.registerTool(
+    "read",
+    {
+      description: "Read from Things 3. Returns JSON with full item details including IDs.",
+      inputSchema: {
+        list: z
+          .enum([...sql.LISTS, "projects", "areas", "tags"])
+          .optional()
+          .describe("Built-in list, or 'projects'/'areas'/'tags' to list all"),
+        project: z.string().optional().describe("Project name — returns its todos"),
+        area: z.string().optional().describe("Area name — returns its projects"),
+        id: z.string().optional().describe("Todo or project ID — returns full detail with checklist/child todos"),
+        limit: limitSchema.describe("Max items to return"),
+        offset: offsetSchema,
+        completed_after: deadlineSchema.optional().describe("Only return items completed/canceled on or after yyyy-mm-dd"),
+        completed_before: deadlineSchema.optional().describe("Only return items completed/canceled on or before yyyy-mm-dd"),
+      },
+      annotations: READ_ONLY,
+    },
+    tool(async ({ list, project, area, id, limit, offset, completed_after, completed_before }, options) => {
+      requireOneSelector(list, project, area, id);
+      let result: unknown;
+      if (id != null) {
+        result = await readItem(runtime, id, false, options);
+      } else if (project != null) {
+        const readOptions = { limit, offset, completed_after, completed_before };
+        result = await sqlFirst(
+          runtime,
+          (db) => sql.readProjectTodos(db, project, readOptions),
+          async () => page(await jxaRead<Item[]>(runtime, JXA_PROJECT_TODOS, { name: project }, options), readOptions),
+        );
+      } else if (area != null) {
+        result = await readAreaProjects(runtime, area, options);
+      } else if (list === "projects") {
+        result = await sqlFirst(runtime, sql.listProjects, () => jxaRead<Item[]>(runtime, JXA_PROJECTS, undefined, options));
+      } else if (list === "areas") {
+        result = await sqlFirst(runtime, sql.listAreas, () => jxaRead<Item[]>(runtime, JXA_AREAS, undefined, options));
+      } else if (list === "tags") {
+        result = await sqlFirst(runtime, sql.listTags, () => jxaRead<Item[]>(runtime, JXA_TAGS, undefined, options));
+      } else {
+        result = await readList(runtime, list!, {
+          limit: limit ?? DEFAULT_LIMIT,
+          offset,
+          completed_after,
+          completed_before,
+        }, options);
+      }
+      return JSON.stringify(result);
+    }),
+  );
+
+  tools.search = server.registerTool(
+    "search",
+    {
+      description: "Search Things 3 open todos by name or tag. Returns JSON.",
+      inputSchema: {
+        query: z.string().optional().describe("Text to search in todo names"),
+        tag: z.string().optional().describe("Tag name to filter by"),
+        limit: limitSchema.describe("Max items to return"),
+        offset: offsetSchema,
+      },
+      annotations: READ_ONLY,
+    },
+    tool(async ({ query, tag, limit, offset }, options) => {
+      if (!query && !tag) throw new Error("Provide query or tag");
+      const paging = { limit: limit ?? DEFAULT_LIMIT, offset: offset ?? 0 };
+      return JSON.stringify(await sqlFirst(
+        runtime,
+        (db) => sql.search(db, { query, tag, ...paging }),
+        () => jxaRead<Item[]>(runtime, JXA_SEARCH, { query: query ?? null, tag: tag ?? null, ...paging }, options),
+      ));
+    }),
+  );
+
+  tools.export_markdown = server.registerTool(
+    "export_markdown",
+    {
+      description: "Export Things items as clean markdown for pasting into notes. Returns raw markdown text, not JSON.",
+      inputSchema: {
+        list: z.enum(sql.LISTS).optional().describe("Built-in list to render as markdown"),
+        project: z.string().optional().describe("Project name — renders its todos"),
+        area: z.string().optional().describe("Area name — renders shallow per-project summaries"),
+        id: z.string().optional().describe("Todo or project ID — renders detail"),
+        include_notes: z.boolean().optional().describe("Include notes in the output (default true)"),
+        include_completed: z.boolean().optional().describe("Include completed and canceled items (default false)"),
+        limit: limitSchema.describe("Max items to return for list reads"),
+        offset: offsetSchema,
+        completed_after: deadlineSchema.optional().describe("For list reads: only include items completed/canceled on or after yyyy-mm-dd"),
+        completed_before: deadlineSchema.optional().describe("For list reads: only include items completed/canceled on or before yyyy-mm-dd"),
+      },
+      annotations: READ_ONLY,
+    },
+    tool(async (args, options) => {
+      const { list, project, area, id } = args;
+      requireOneSelector(list, project, area, id);
+      const opts = {
+        includeNotes: args.include_notes ?? true,
+        includeCompleted: args.include_completed ?? (list === "logbook" || list === "trash"),
+      };
+      if (id != null) {
+        return renderItem((await readItem(runtime, id, true, options)) as MdItem, opts);
+      }
+      if (project != null) {
+        const item = await sqlFirst(
+          runtime,
+          (db) => sql.readProject(db, project),
+          () => jxaRead<Item>(runtime, JXA_ITEM, { name: project, childChecklists: true }, options),
+        );
+        return renderProject(item as MdProject, opts);
+      }
+      if (area != null) {
+        return renderArea(area, (await readAreaProjects(runtime, area, options)) as MdProject[]);
+      }
+      const items = await readList(runtime, list!, {
+        limit: args.limit ?? DEFAULT_LIMIT,
+        offset: args.offset,
+        completed_after: args.completed_after,
+        completed_before: args.completed_before,
+      }, options);
+      return renderList(list!, items as MdItem[], opts);
+    }),
+  );
+
+  tools.stats = server.registerTool(
+    "stats",
+    {
+      description: "Return Things counts: windowed (completed, canceled, created) and snapshot (overdue, inbox, today). Needs Things' SQLite database. Windows use local-time calendar days.",
+      inputSchema: {
+        since: deadlineSchema.optional().describe("yyyy-mm-dd (default: until)"),
+        until: deadlineSchema.optional().describe("yyyy-mm-dd (default: today, local time)"),
+      },
+      annotations: READ_ONLY,
+    },
+    tool(async ({ since, until }) => {
+      const windowUntil = until ?? todayIso();
+      const windowSince = since ?? windowUntil;
+      if (windowSince > windowUntil) throw new Error("until must be >= since");
+      if (!runtime.dbPath) throw new Error("stats needs Things' SQLite database. Run doctor for details.");
+      return JSON.stringify(sql.stats(runtime.dbPath, { since: windowSince, until: windowUntil }));
+    }),
+  );
+
+  tools.add_todo = server.registerTool(
+    "add_todo",
+    {
+      description: "Create a todo in Things 3. Returns the created item with its ID.",
+      inputSchema: {
+        title: z.string(),
+        notes: z.string().optional(),
+        when: whenSchema.optional().describe("today | tomorrow | evening | anytime | someday | yyyy-mm-dd"),
+        deadline: deadlineSchema.optional().describe("yyyy-mm-dd"),
+        tags: z.array(z.string()).optional(),
+        list: z.string().optional().describe("Project name to add the todo to"),
+        checklist_items: z.array(z.string()).optional(),
+      },
+      annotations: WRITE,
+    },
+    tool(async (params, options) => {
+      const tagsNeedJson = needsJsonTagWrite(params.tags);
+      const attributes = jsonUpdateAttributes("todo", {
+        when: usesJsonOnlyWhen(params.when) ? params.when : undefined,
+        tags: tagsNeedJson ? params.tags : undefined,
+        checklist_items: params.checklist_items?.length ? params.checklist_items : undefined,
+      });
+      if (attributes) requireToken(runtime.token);
+
+      const created = await runtime.jxa(JXA_ADD_TODO, { ...params, tagsNeedJson }, options);
+      if (!attributes) return created;
+      return patchAndReread(runtime, "todo", (JSON.parse(created) as { id: string }).id, attributes, options);
+    }),
+  );
+
+  tools.add_project = server.registerTool(
+    "add_project",
+    {
+      description: "Create a project in Things 3 with optional child todos. Returns the created project with ID.",
+      inputSchema: {
+        title: z.string(),
+        notes: z.string().optional(),
+        when: whenSchema.optional().describe("today | tomorrow | evening | anytime | someday | yyyy-mm-dd"),
+        deadline: deadlineSchema.optional().describe("yyyy-mm-dd"),
+        tags: z.array(z.string()).optional(),
+        area: z.string().optional().describe("Area name"),
+        todos: z.array(z.string()).optional().describe("Child todo titles"),
+      },
+      annotations: WRITE,
+    },
+    tool(async (params, options) => {
+      const tagsNeedJson = needsJsonTagWrite(params.tags);
+      const attributes = jsonUpdateAttributes("project", {
+        when: usesJsonOnlyWhen(params.when) ? params.when : undefined,
+        tags: tagsNeedJson ? params.tags : undefined,
+      });
+      if (attributes) requireToken(runtime.token);
+
+      const created = await runtime.jxa(JXA_ADD_PROJECT, { ...params, tagsNeedJson }, options);
+      if (!attributes) return created;
+      return patchAndReread(runtime, "project", (JSON.parse(created) as { id: string }).id, attributes, options);
+    }),
+  );
+
+  tools.update = server.registerTool(
+    "update",
+    {
+      description: "Update a todo or project in Things 3 by ID. Detects item type automatically.",
+      inputSchema: {
+        id: z.string().describe("Todo or project ID"),
+        title: z.string().optional(),
+        notes: z.string().optional().describe("Replace notes (use empty string to clear)"),
+        when: updateWhenSchema
+          .optional()
+          .describe("today | tomorrow | evening | anytime | someday | yyyy-mm-dd | empty string to clear"),
+        deadline: updateDeadlineSchema.optional().describe("yyyy-mm-dd (empty string to clear)"),
+        tags: z.array(z.string()).optional().describe("Replace all tags"),
+        checklist_items: z.array(z.string()).optional().describe("Replace all checklist items"),
+        completed: z.boolean().optional(),
+        canceled: z.boolean().optional(),
+        list: z.string().optional().describe("Move to project (todos) or area (projects) by name"),
+      },
+      annotations: WRITE,
+    },
+    tool(async (params, options) => {
+      const { id, ...fields } = params;
+      if (Object.values(fields).every((value) => value === undefined)) {
+        throw new Error("Provide at least one field to update");
+      }
+      if (params.title === "") throw new Error("title must not be empty");
+
+      // JXA cannot clear when or deadline, set evening/anytime/someday, write checklists, or write comma tags.
+      const tagsNeedJson = needsJsonTagWrite(params.tags);
+      const clears = params.when === "" || params.deadline === "";
+      const patch: JsonPatch = {
+        when: usesJsonOnlyWhen(params.when) ? params.when : undefined,
+        tags: tagsNeedJson ? params.tags : undefined,
+        checklist_items: params.checklist_items,
+      };
+      if (clears || jsonUpdateAttributes("todo", patch)) requireToken(runtime.token);
+
+      const { kind, item } = JSON.parse(await runtime.jxa(JXA_UPDATE, { ...params, tagsNeedJson }, options)) as {
+        kind: "todo" | "project";
+        item: unknown;
+      };
+      const attributes = jsonUpdateAttributes(kind, patch);
+      if (!clears && !attributes) return JSON.stringify(normalizeThingsValue(item));
+
+      if (clears) {
+        await runtime.quietUrl(kind === "project" ? "update-project" : "update", {
+          "auth-token": runtime.token,
+          id,
+          when: params.when === "" ? "" : undefined,
+          deadline: params.deadline === "" ? "" : undefined,
+        }, options);
+      }
+      if (attributes) await runtime.quietJson([jsonUpdate(kind, id, attributes)], options);
+      return JSON.stringify(await jxaRead<Item>(runtime, JXA_ITEM, { id }, options));
+    }),
   );
 
   tools.bulk_update = server.registerTool(
@@ -936,61 +570,36 @@ return JSON.stringify({kind: type, item: type === "todo" ? todoOf(item) : projec
     {
       description: "Update multiple todos or projects at once. Uses Things JSON updates and requires THINGS_AUTH_TOKEN.",
       inputSchema: {
-      ids: z.array(z.string()).min(1).describe("Todo or project IDs"),
-      title: z.string().optional(),
-      notes: z.string().optional().describe("Replace notes"),
-      when: whenSchema.optional().describe("today | tomorrow | evening | anytime | someday | yyyy-mm-dd"),
-      deadline: deadlineSchema.optional().describe("yyyy-mm-dd"),
-      tags: z.array(z.string()).optional().describe("Replace all tags"),
-      checklist_items: z.array(z.string()).optional().describe("Replace all checklist items on todos"),
-      completed: z.boolean().optional(),
-      canceled: z.boolean().optional(),
-      list: z.string().optional().describe("Move todos to a project/area, or projects to an area"),
+        ids: z.array(z.string()).min(1).describe("Todo or project IDs"),
+        title: z.string().optional(),
+        notes: z.string().optional().describe("Replace notes"),
+        when: whenSchema.optional().describe("today | tomorrow | evening | anytime | someday | yyyy-mm-dd"),
+        deadline: deadlineSchema.optional().describe("yyyy-mm-dd"),
+        tags: z.array(z.string()).optional().describe("Replace all tags"),
+        checklist_items: z.array(z.string()).optional().describe("Replace all checklist items on todos"),
+        completed: z.boolean().optional(),
+        canceled: z.boolean().optional(),
+        list: z.string().optional().describe("Move todos to a project/area, or projects to an area"),
       },
-      annotations: MUTATING_WRITE,
+      annotations: WRITE,
     },
-    async (params, extra) => {
-      const options = requestOptions(extra);
-      try {
-        requireToken(runtime.token);
-        const detail = await runtime.jxa(
-          `return JSON.stringify(P.ids.map(function(id) {
-  try {
-    var project = app.projects.byId(id); project.id();
-    return {id: id, kind: "project"};
-  } catch(e) {
-    var todo = app.toDos.byId(id); todo.id();
-    return {id: id, kind: "todo"};
-  }
-}));`,
-          { ids: params.ids },
-          options,
-        );
-        const items = JSON.parse(detail) as Array<{ id: string; kind: "todo" | "project" }>;
-        const operations = items
-          .map((item) =>
-            buildJsonUpdateOperation(item.kind, item.id, {
-              title: params.title,
-              notes: params.notes,
-              when: params.when,
-              deadline: params.deadline,
-              tags: params.tags,
-              list: params.list,
-              completed: params.completed,
-              canceled: params.canceled,
-              checklist_items: params.checklist_items,
-            }),
-          )
-          .filter((operation): operation is Record<string, unknown> => operation != null);
-        if (!operations.length) {
-          return fail("Provide at least one field to update");
-        }
-        await runtime.quietJson(operations, undefined, options);
-        return ok(JSON.stringify(items.map((item) => ({ id: item.id, kind: item.kind, updated: true }))));
-      } catch (error) {
-        return fail(errmsg(error));
-      }
-    },
+    tool(async ({ ids, ...patch }, options) => {
+      requireToken(runtime.token);
+      if (!jsonUpdateAttributes("todo", patch)) throw new Error("Provide at least one field to update");
+
+      const items = JSON.parse(await runtime.jxa(JXA_KINDS, { ids }, options)) as Array<{
+        id: string;
+        kind: "todo" | "project";
+      }>;
+      const operations = items.flatMap((item) => {
+        const attributes = jsonUpdateAttributes(item.kind, patch);
+        return attributes ? [jsonUpdate(item.kind, item.id, attributes)] : [];
+      });
+      if (!operations.length) throw new Error("Provide at least one field to update");
+
+      await runtime.quietJson(operations, options);
+      return JSON.stringify(items.map((item) => ({ id: item.id, kind: item.kind, updated: true })));
+    }),
   );
 
   tools.delete = server.registerTool(
@@ -998,37 +607,11 @@ return JSON.stringify({kind: type, item: type === "todo" ? todoOf(item) : projec
     {
       description: "Move a todo, project, or area to Things Trash.",
       inputSchema: {
-      id: z.string().describe("Todo, project, or area ID"),
+        id: z.string().describe("Todo, project, or area ID"),
       },
-      annotations: DESTRUCTIVE_WRITE,
+      annotations: DESTRUCTIVE,
     },
-    async ({ id }, extra) => {
-      const options = requestOptions(extra);
-      try {
-        const result = await runtime.jxa(
-          `try {
-  var project = app.projects.byId(P.id); project.id();
-  app.delete(project);
-  return JSON.stringify({id: P.id, kind: "project", deleted: true});
-} catch(e1) {
-  try {
-    var todo = app.toDos.byId(P.id); todo.id();
-    app.delete(todo);
-    return JSON.stringify({id: P.id, kind: "todo", deleted: true});
-  } catch(e2) {
-    var area = app.areas.byId(P.id); area.id();
-    app.delete(area);
-    return JSON.stringify({id: P.id, kind: "area", deleted: true});
-  }
-}`,
-          { id },
-          options,
-        );
-        return ok(result);
-      } catch (error) {
-        return fail(errmsg(error));
-      }
-    },
+    tool(({ id }, options) => runtime.jxa(JXA_DELETE, { id }, options)),
   );
 
   tools.empty_trash = server.registerTool(
@@ -1036,20 +619,15 @@ return JSON.stringify({kind: type, item: type === "todo" ? todoOf(item) : projec
     {
       description: "Permanently delete everything currently in Things Trash.",
       inputSchema: {
-      confirm: z.boolean().describe("Must be true to permanently empty Things Trash"),
+        confirm: z.boolean().describe("Must be true to permanently empty Things Trash"),
       },
-      annotations: DESTRUCTIVE_WRITE,
+      annotations: DESTRUCTIVE,
     },
-    async ({ confirm }, extra) => {
-      const options = requestOptions(extra);
-      if (!confirm) return fail("Set confirm=true to permanently empty Things Trash");
-      try {
-        await runtime.jxa("app.emptyTrash();", undefined, options);
-        return ok('{"emptied":true}');
-      } catch (error) {
-        return fail(errmsg(error));
-      }
-    },
+    tool(async ({ confirm }, options) => {
+      if (!confirm) throw new Error("Set confirm=true to permanently empty Things Trash");
+      await runtime.jxa("app.emptyTrash();", undefined, options);
+      return '{"emptied":true}';
+    }),
   );
 
   tools.show = server.registerTool(
@@ -1057,30 +635,19 @@ return JSON.stringify({kind: type, item: type === "todo" ? todoOf(item) : projec
     {
       description: "Navigate Things 3 to a list, project, area, or item. Uses background URL dispatch.",
       inputSchema: {
-      id: z
-        .string()
-        .optional()
-        .describe("Built-in list (inbox, today, anytime, upcoming, someday, logbook) or item ID"),
-      query: z
-        .string()
-        .optional()
-        .describe("Project, area, or tag name to navigate to"),
+        id: z
+          .string()
+          .optional()
+          .describe("Built-in list (inbox, today, anytime, upcoming, someday, logbook) or item ID"),
+        query: z.string().optional().describe("Project, area, or tag name to navigate to"),
       },
       annotations: READ_ONLY,
     },
-    async ({ id, query }, extra) => {
-      if (!id && !query) return fail("Provide id or query");
-      const options = requestOptions(extra);
-      try {
-        await runtime.quietUrl("show", {
-          id: id ?? undefined,
-          query: query ?? undefined,
-        }, options);
-        return ok(`Showing: ${id ?? query}`);
-      } catch (error) {
-        return fail(errmsg(error));
-      }
-    },
+    tool(async ({ id, query }, options) => {
+      if (!id && !query) throw new Error("Provide id or query");
+      await runtime.quietUrl("show", { id, query }, options);
+      return `Showing: ${id ?? query}`;
+    }),
   );
 
   return tools;

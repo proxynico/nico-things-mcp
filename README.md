@@ -43,7 +43,9 @@ No credential is required for normal JXA reads and writes. Some authenticated JS
 - `delete`, `empty_trash`: destructive actions with MCP metadata and explicit trash confirmation
 - `show`: open an item or search in Things without activating the app
 
-Reads use Things' local SQLite database first when supported and fall back to JXA if SQLite is unavailable. Computed lists use JXA. `stats` is intentionally SQLite-only.
+Reads come straight from Things' local SQLite database. If the database can't be read, they fall back to asking Things over JXA. `stats` needs the database.
+
+Things only updates the database while it runs, so the server opens Things hidden in the background when it starts. Right after that, reads can lag for the few seconds Things takes to sync. Settled 28 October 2026 by Nico. Rejected: leaving Things closed, with reads showing what it last synced.
 
 ## Configuration
 
@@ -51,9 +53,7 @@ Reads use Things' local SQLite database first when supported and fall back to JX
 | --- | --- | --- |
 | `THINGS_APP_PATH` | Things application path | `/Applications/Things3.app` |
 | `THINGS_DB_PATH` | Explicit Things SQLite path | Auto-detected |
-| `THINGS_FAST_READS` | Set to `0` to disable SQLite reads | Enabled |
-| `COSITAS_SQL_READS` | Set to `0` to route supported reads through JXA | Enabled |
-| `COSITAS_FAIL_FAST` | Set to `1` to require a successful JXA startup probe | Disabled |
+| `THINGS_FAST_READS` | Set to `0` to read through JXA instead of SQLite | Enabled |
 
 ## Development
 
