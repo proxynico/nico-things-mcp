@@ -125,7 +125,7 @@ catch(e) { item = app.toDos.byId(P.id); item.id(); type = "todo"; }
 if (P.title) item.name = P.title;
 if (P.hasOwnProperty("notes")) item.notes = P.notes || "";
 if (P.hasOwnProperty("tags") && !P.tagsNeedJson) item.tagNames = P.tags ? P.tags.join(", ") : "";
-if (P.hasOwnProperty("deadline")) item.dueDate = P.deadline ? new Date(P.deadline + "T12:00:00") : null;
+if (P.deadline) item.dueDate = new Date(P.deadline + "T12:00:00");
 if (P.list) {
   if (type === "todo") {
     var project = app.projects.byName(P.list);
@@ -143,21 +143,19 @@ else if (P.completed) item.status = "completed";
 else if (P.completed === false || P.canceled === false) item.status = "open";
 return JSON.stringify({kind: type, item: type === "todo" ? todoOf(item) : projectOf(item)});`;
 
-const JXA_DELETE = `try {
-  var project = app.projects.byId(P.id); project.id();
-  app.delete(project);
-  return JSON.stringify({id: P.id, kind: "project", deleted: true});
-} catch(e1) {
-  try {
-    var todo = app.toDos.byId(P.id); todo.id();
-    app.delete(todo);
-    return JSON.stringify({id: P.id, kind: "todo", deleted: true});
-  } catch(e2) {
-    var area = app.areas.byId(P.id); area.id();
-    app.delete(area);
-    return JSON.stringify({id: P.id, kind: "area", deleted: true});
-  }
-}`;
+const JXA_DELETE = `var kind, item;
+try { item = app.projects.byId(P.id); item.id(); kind = "project"; }
+catch(e1) {
+  try { item = app.toDos.byId(P.id); item.id(); kind = "todo"; }
+  catch(e2) { item = app.areas.byId(P.id); item.id(); kind = "area"; }
+}
+// Things only deletes a completed or canceled item through the Logbook.
+try { app.delete(item); }
+catch(e) {
+  if (kind === "area") throw e;
+  app.delete(app.lists.byName("Logbook").toDos.byId(P.id));
+}
+return JSON.stringify({id: P.id, kind: kind, deleted: true});`;
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: true };
 
@@ -537,28 +535,29 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime): Record
       }
       if (params.title === "") throw new Error("title must not be empty");
 
-      // JXA cannot clear when, set evening/anytime/someday, write checklists, or write comma tags.
+      // JXA cannot clear when or deadline, set evening/anytime/someday, write checklists, or write comma tags.
       const tagsNeedJson = needsJsonTagWrite(params.tags);
-      const clearWhen = params.when === "";
+      const clears = params.when === "" || params.deadline === "";
       const patch: JsonPatch = {
         when: usesJsonOnlyWhen(params.when) ? params.when : undefined,
         tags: tagsNeedJson ? params.tags : undefined,
         checklist_items: params.checklist_items,
       };
-      if (clearWhen || jsonUpdateAttributes("todo", patch)) requireToken(runtime.token);
+      if (clears || jsonUpdateAttributes("todo", patch)) requireToken(runtime.token);
 
       const { kind, item } = JSON.parse(await runtime.jxa(JXA_UPDATE, { ...params, tagsNeedJson }, options)) as {
         kind: "todo" | "project";
         item: unknown;
       };
       const attributes = jsonUpdateAttributes(kind, patch);
-      if (!clearWhen && !attributes) return JSON.stringify(normalizeThingsValue(item));
+      if (!clears && !attributes) return JSON.stringify(normalizeThingsValue(item));
 
-      if (clearWhen) {
+      if (clears) {
         await runtime.quietUrl(kind === "project" ? "update-project" : "update", {
           "auth-token": runtime.token,
           id,
-          when: "",
+          when: params.when === "" ? "" : undefined,
+          deadline: params.deadline === "" ? "" : undefined,
         }, options);
       }
       if (attributes) await runtime.quietJson([jsonUpdate(kind, id, attributes)], options);

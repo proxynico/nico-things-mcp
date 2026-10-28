@@ -163,10 +163,26 @@ function listQuery(list: ListName, today: number): { where: string[]; params: nu
       return { where: [...OPEN, "t.start = 2", "t.startDate > ?"], params: [today], orderBy: 't.startDate, t."index"' };
     case "someday":
       return { where: [...OPEN, "t.start = 2", "t.startDate is null"], params: [], orderBy: BY_AREA };
+    // A logged or trashed project shows as one row; its todos stay inside it.
     case "logbook":
-      return { where: ["t.type in (0, 1)", "t.trashed = 0", "t.status in (2, 3)"], params: [], orderBy: "t.stopDate desc" };
+      return {
+        where: [
+          "t.type in (0, 1)",
+          "t.trashed = 0",
+          "t.status in (2, 3)",
+          "coalesce(h.trashed, 0) = 0",
+          "coalesce(p.trashed, 0) = 0",
+          "coalesce(p.status, 0) = 0",
+        ],
+        params: [],
+        orderBy: "t.stopDate desc",
+      };
     case "trash":
-      return { where: ["t.type in (0, 1)", "t.trashed = 1"], params: [], orderBy: "t.userModificationDate desc" };
+      return {
+        where: ["t.type in (0, 1)", "t.trashed = 1", "coalesce(h.trashed, 0) = 0", "coalesce(p.trashed, 0) = 0"],
+        params: [],
+        orderBy: "t.userModificationDate desc",
+      };
   }
 }
 

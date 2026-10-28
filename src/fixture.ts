@@ -66,7 +66,9 @@ export const TASKS: Task[] = [
   { uuid: "t-future", title: "Future deadline", area: "area-2", deadline: packDay(400) },
   { uuid: "t-log-done", title: "Logged done", status: 3, stopDate: STOP_DONE, project: "proj-1" },
   { uuid: "t-log-cancel", title: "Logged canceled", status: 2, stopDate: STOP_CANCEL },
+  { uuid: "t-in-done", title: "In done project", status: 3, stopDate: STOP_DONE - 10, project: "proj-2" },
   { uuid: "t-trash", title: "Trashed", trashed: 1 },
+  { uuid: "t-trash-in", title: "Trashed under trashed heading", trashed: 1, heading: "head-2" },
 ];
 
 export function createFixtureDb(path: string): void {

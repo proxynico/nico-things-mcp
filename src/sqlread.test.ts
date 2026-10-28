@@ -184,7 +184,7 @@ describe("stats", () => {
   test("counts the window and today's snapshot", () => {
     expect(sql.stats(dbPath, { since: "2000-01-01", until: "2099-12-31" })).toEqual({
       window: { since: "2000-01-01", until: "2099-12-31" },
-      completed: 2,
+      completed: 3,
       canceled: 1,
       created: 2,
       overdue: 1,

@@ -524,20 +524,22 @@ describe("update", () => {
     expect(quietJsonCalls).toEqual([[{ type: "to-do", operation: "update", id: "1", attributes: { "checklist-items": [] } }]]);
   });
 
-  test("clears when through the update URL and still applies a JSON patch", async () => {
+  test("clears when and deadline through the update URL and still applies a JSON patch", async () => {
     const { tools, quietCalls, quietJsonCalls } = createMockApp({
       jxa: sequence('{"kind":"todo","item":{"id":"1"}}', '{"id":"1","activationDate":null}'),
     });
 
-    const result = await callTool(tools.update, { id: "1", when: "", checklist_items: ["A"] });
+    const result = await callTool(tools.update, { id: "1", when: "", deadline: "", checklist_items: ["A"] });
     expect(textOf(result)).toContain('"activationDate":null');
-    expect(quietCalls).toEqual([{ path: "update", params: { "auth-token": "token", id: "1", when: "" } }]);
+    expect(quietCalls).toEqual([
+      { path: "update", params: { "auth-token": "token", id: "1", when: "", deadline: "" } },
+    ]);
     expect(quietJsonCalls).toHaveLength(1);
   });
 
   test("fails before mutating when a JSON-only field lacks auth", async () => {
     const { tools, jxaCalls } = createMockApp({ token: "" });
-    for (const args of [{ when: "anytime" }, { when: "" }, { checklist_items: [] }]) {
+    for (const args of [{ when: "anytime" }, { when: "" }, { deadline: "" }, { checklist_items: [] }]) {
       const result = await callTool(tools.update, { id: "1", ...args });
       expect(textOf(result)).toBe("THINGS_AUTH_TOKEN is required for this operation");
     }
@@ -610,7 +612,7 @@ describe("delete and trash", () => {
     const result = await callTool(tools.delete, { id: "1" });
     expect(textOf(result)).toBe('{"id":"1","kind":"todo","deleted":true}');
     const body = jxaCalls[0]?.body ?? "";
-    expect(body).toContain("app.delete(todo);");
+    expect(body).toContain('app.lists.byName("Logbook").toDos.byId(P.id)');
     expect(body.indexOf("app.projects.byId")).toBeLessThan(body.indexOf("app.toDos.byId"));
   });
 
@@ -1050,7 +1052,7 @@ describe("stats", () => {
       window: { since: "2026-04-05", until: "2026-04-05" },
     });
     expect(jsonOf(await callTool(tools.stats, { since: "2000-01-01", until: "2099-12-31" }))).toMatchObject({
-      completed: 2,
+      completed: 3,
       canceled: 1,
       inbox: 1,
     });
