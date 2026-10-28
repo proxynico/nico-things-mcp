@@ -88,6 +88,7 @@ var scheduleWhen = function(obj, w) {
 };`;
 
 // Things only updates its database while it runs, so SQLite reads keep it open, hidden.
+// Settled 28 October 2026 by Nico. Rejected: leaving Things closed, with reads showing what it last synced.
 export async function openThingsHidden(execFn: ExecFn = exec): Promise<void> {
   await execFn("osascript", [
     "-l",
