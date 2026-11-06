@@ -10,7 +10,7 @@ import { CreateRequests } from "./creates";
 import { createServer } from "./index";
 import { renderArea, renderList, renderProject, renderTodo, type MdProject, type MdTodo } from "./markdown";
 import { createRuntime } from "./runtime";
-import { errmsg, isSandboxAutomationError, normalizeThingsValue, type ThingsRuntime } from "./shared";
+import { errmsg, isoDayToUnixStart, isSandboxAutomationError, normalizeThingsValue, type ThingsRuntime } from "./shared";
 
 const dir = mkdtempSync(join(tmpdir(), "nico-things-mcp-tools-"));
 const dbPath = join(dir, "things.sqlite");
@@ -301,6 +301,17 @@ describe("read", () => {
       offset: 1,
     });
     expect(ids(result)).toEqual(["b", "c"]);
+  });
+
+  test("JXA list fallback asks Things only for items finished since completed_after", async () => {
+    const { tools, jxaCalls } = createMockApp();
+
+    await callTool(tools.read, { list: "logbook", completed_after: "2026-04-01" });
+    expect(jxaCalls[0]?.args).toEqual({ name: "Logbook", after: isoDayToUnixStart("2026-04-01") * 1000 });
+    expect(jxaCalls[0]?.body).toContain("whose");
+
+    await callTool(tools.read, { list: "logbook" });
+    expect(jxaCalls[1]?.args).toEqual({ name: "Logbook" });
   });
 
   test("returns read errors from JXA", async () => {

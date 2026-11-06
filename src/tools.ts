@@ -50,9 +50,18 @@ var r = projectOf(item);
 r.todos = item.toDos().map(P.childChecklists ? withChecklist : todoOf);
 return JSON.stringify(r);`;
 
+// P.after narrows the read to items finished since then, so a long Logbook is not read whole.
 const JXA_LIST = `var list = app.lists.byName(P.name);
-var items = list.toDos().map(todoOf);
-try { items = items.concat(list.projects().map(projectOf)); } catch(e) {}
+var after = P.after == null ? null : new Date(P.after);
+var since = function(items) {
+  if (!after) return items();
+  return items.whose({_or: [
+    {completionDate: {_greaterThanEquals: after}},
+    {cancellationDate: {_greaterThanEquals: after}}
+  ]})();
+};
+var items = since(list.toDos).map(todoOf);
+try { items = items.concat(since(list.projects).map(projectOf)); } catch(e) {}
 return JSON.stringify(items);`;
 
 const JXA_PROJECT_TODOS = `var p = app.projects.byName(P.name); p.id();
@@ -233,7 +242,10 @@ function readList(runtime: ThingsRuntime, list: ListName, readOptions: ReadOptio
     (db) => sql.readList(db, list, readOptions),
     async () => {
       const name = list.charAt(0).toUpperCase() + list.slice(1);
-      return page(await jxaRead<Item[]>(runtime, JXA_LIST, { name }, options), readOptions);
+      const args = readOptions.completed_after
+        ? { name, after: isoDayToUnixStart(readOptions.completed_after) * 1000 }
+        : { name };
+      return page(await jxaRead<Item[]>(runtime, JXA_LIST, args, options), readOptions);
     },
   );
 }
