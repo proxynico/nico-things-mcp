@@ -419,7 +419,7 @@ describe("add_todo", () => {
 
     const result = await callTool(tools.add_todo, { request_id: randomUUID(), title: "Draft", list: "Roadmap", checklist_items: [] });
     expect(textOf(result)).toBe('{"id":"todo-1","name":"Draft","status":"open"}');
-    expect(jxaCalls[0]?.body).toContain("project.id();");
+    expect(jxaCalls[0]?.body).toContain("app.projects.byName(P.name).id();");
     expect(quietCalls).toHaveLength(0);
     expect(quietJsonCalls).toHaveLength(0);
   });
@@ -469,7 +469,7 @@ describe("add_project", () => {
     });
 
     await callTool(tools.add_project, { request_id: randomUUID(), title: "Launch", area: "Work", todos: ["Ship it"] });
-    expect(jxaCalls[0]?.body).toContain("area.id();");
+    expect(jxaCalls[0]?.body).toContain("app.areas.byName(P.name).id();");
     expect(jxaCalls[1]?.body).toContain("t.project = proj;");
   });
 
