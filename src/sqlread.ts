@@ -333,19 +333,16 @@ export function stats(dbPath: string, window: StatsWindow): StatsResult {
       )
       .get(isoDayToUnixStart(window.since), isoDayToUnixEnd(window.until)) as Pick<StatsResult, "completed" | "canceled" | "created">;
 
-    const countList = (list: ListName): number => {
-      const { where, params } = listQuery(list, today);
-      const sql = `select count(*) as n ${FROM} where ${where.join(" and ")}`;
-      return (db.query(sql).get(...params) as { n: number }).n;
-    };
-    const { n: overdue } = db
-      .query(
-        `select count(*) as n from TMTask
-         where trashed = 0 and type = 0 and status = 0 and rt1_recurrenceRule is null and deadline < ?`,
-      )
-      .get(today) as { n: number };
+    const count = ({ where, params }: { where: string[]; params: number[] }): number =>
+      (db.query(`select count(*) as n ${FROM} where ${where.join(" and ")}`).get(...params) as { n: number }).n;
 
-    return { window, ...windowed, overdue, inbox: countList("inbox"), today: countList("today") };
+    return {
+      window,
+      ...windowed,
+      overdue: count({ where: [...OPEN, NOT_TEMPLATE, "t.type = 0", "t.deadline < ?"], params: [today] }),
+      inbox: count(listQuery("inbox", today)),
+      today: count(listQuery("today", today)),
+    };
   });
 }
 

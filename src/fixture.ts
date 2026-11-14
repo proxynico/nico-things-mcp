@@ -63,7 +63,7 @@ export const TASKS: Task[] = [
   { uuid: "t-later", title: "In someday project", project: "proj-3" },
   { uuid: "t-started", title: "In started project", project: "proj-4" },
   { uuid: "t-someday-in-proj", title: "Someday inside a project", start: 2, project: "proj-4", index: 1 },
-  { uuid: "t-dropped", title: "Under trashed heading", heading: "head-2" },
+  { uuid: "t-dropped", title: "Under trashed heading", heading: "head-2", deadline: packDay(-2) },
   { uuid: "t-template", title: "Repeating template", start: 2, rt1_recurrenceRule: "rule" },
   {
     uuid: "t-template-weekly",
