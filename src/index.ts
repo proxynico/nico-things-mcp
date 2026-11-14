@@ -12,7 +12,7 @@ import { createRuntime, openThingsHidden } from "./runtime";
 import type { ThingsRuntime } from "./shared";
 import { registerTools } from "./tools";
 
-export function createServer(runtime: ThingsRuntime = createRuntime(), requests = new CreateRequests()): {
+export function createServer(runtime: ThingsRuntime, requests = new CreateRequests()): {
   server: McpServer;
   tools: Record<string, RegisteredTool>;
 } {

@@ -1,7 +1,7 @@
 import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { setTimeout as pause } from "node:timers/promises";
 import { z } from "zod";
-import { CreateRequests } from "./creates";
+import type { CreateRequests } from "./creates";
 import { type MdItem, type MdProject, renderArea, renderItem, renderList, renderProject } from "./markdown";
 import {
   deadlineSchema,
@@ -16,6 +16,7 @@ import {
   normalizeThingsValue,
   requireToken,
   type RuntimeCallOptions,
+  THINGS_APP_PATH,
   THINGS_FAST_READS,
   type ThingsRuntime,
   todayIso,
@@ -235,16 +236,15 @@ function readItem(runtime: ThingsRuntime, id: string, childChecklists: boolean, 
   );
 }
 
-function readList(runtime: ThingsRuntime, list: ListName, readOptions: ReadOptions, options: RuntimeCallOptions) {
+function readList(runtime: ThingsRuntime, list: ListName, given: ReadOptions, options: RuntimeCallOptions) {
+  const readOptions = { ...given, limit: given.limit ?? DEFAULT_LIMIT };
   return sqlFirst(
     runtime,
     (db) => sql.readList(db, list, readOptions),
     async () => {
       const name = list.charAt(0).toUpperCase() + list.slice(1);
-      const args = readOptions.completed_after
-        ? { name, after: isoDayToUnixStart(readOptions.completed_after) * 1000 }
-        : { name };
-      return page(await jxaRead<Item[]>(runtime, JXA_LIST, args, options), readOptions);
+      const after = readOptions.completed_after ? isoDayToUnixStart(readOptions.completed_after) * 1000 : undefined;
+      return page(await jxaRead<Item[]>(runtime, JXA_LIST, { name, after }, options), readOptions);
     },
   );
 }
@@ -324,11 +324,11 @@ async function doctorReport(runtime: ThingsRuntime, options: RuntimeCallOptions)
   let jxaRead: { ok: boolean; app_path: string; message: string };
   try {
     await runtime.jxa("return JSON.stringify(app.lists().map(function(list) { return list.name(); }));", undefined, options);
-    jxaRead = { ok: true, app_path: runtime.appPath, message: "JXA reads are available; checklists require SQLite (null when unavailable)" };
+    jxaRead = { ok: true, app_path: THINGS_APP_PATH, message: "JXA reads are available; checklists require SQLite (null when unavailable)" };
   } catch (error) {
     jxaRead = {
       ok: false,
-      app_path: runtime.appPath,
+      app_path: THINGS_APP_PATH,
       message: isSandboxAutomationError(error)
         ? "Things automation is blocked by the current sandbox. Run the server outside the sandbox."
         : `Things startup check failed: ${errmsg(error)}`,
@@ -342,7 +342,7 @@ async function doctorReport(runtime: ThingsRuntime, options: RuntimeCallOptions)
   return { ok: sqlRead.ok || jxaRead.ok, checks: { sql_read: sqlRead, jxa_read: jxaRead, json_writes } };
 }
 
-export function registerTools(server: McpServer, runtime: ThingsRuntime, requests = new CreateRequests()): Record<string, RegisteredTool> {
+export function registerTools(server: McpServer, runtime: ThingsRuntime, requests: CreateRequests): Record<string, RegisteredTool> {
   const tools: Record<string, RegisteredTool> = {};
 
   tools.doctor = server.registerTool(
@@ -374,13 +374,12 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime, request
       },
       annotations: READ_ONLY,
     },
-    tool(async ({ list, project, area, id, limit, offset, completed_after, completed_before }, options) => {
+    tool(async ({ list, project, area, id, ...readOptions }, options) => {
       requireOneSelector(list, project, area, id);
       let result: unknown;
       if (id != null) {
         result = await readItem(runtime, id, false, options);
       } else if (project != null) {
-        const readOptions = { limit, offset, completed_after, completed_before };
         result = await sqlFirst(
           runtime,
           (db) => sql.readProjectTodos(db, project, readOptions),
@@ -395,12 +394,7 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime, request
       } else if (list === "tags") {
         result = await sqlFirst(runtime, sql.listTags, () => jxaRead<Item[]>(runtime, JXA_TAGS, undefined, options));
       } else {
-        result = await readList(runtime, list!, {
-          limit: limit ?? DEFAULT_LIMIT,
-          offset,
-          completed_after,
-          completed_before,
-        }, options);
+        result = await readList(runtime, list!, readOptions, options);
       }
       return JSON.stringify(result);
     }),
@@ -424,7 +418,7 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime, request
       return JSON.stringify(await sqlFirst(
         runtime,
         (db) => sql.search(db, { query, tag, ...paging }),
-        () => jxaRead<Item[]>(runtime, JXA_SEARCH, { query: query ?? null, tag: tag ?? null, ...paging }, options),
+        () => jxaRead<Item[]>(runtime, JXA_SEARCH, { query, tag, ...paging }, options),
       ));
     }),
   );
@@ -447,12 +441,11 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime, request
       },
       annotations: READ_ONLY,
     },
-    tool(async (args, options) => {
-      const { list, project, area, id } = args;
+    tool(async ({ list, project, area, id, include_notes, include_completed, ...readOptions }, options) => {
       requireOneSelector(list, project, area, id);
       const opts = {
-        includeNotes: args.include_notes ?? true,
-        includeCompleted: args.include_completed ?? (list === "logbook" || list === "trash"),
+        includeNotes: include_notes ?? true,
+        includeCompleted: include_completed ?? (list === "logbook" || list === "trash"),
       };
       if (id != null) {
         return renderItem((await readItem(runtime, id, true, options)) as MdItem, opts);
@@ -468,12 +461,7 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime, request
       if (area != null) {
         return renderArea(area, (await readAreaProjects(runtime, area, options)) as MdProject[]);
       }
-      const items = await readList(runtime, list!, {
-        limit: args.limit ?? DEFAULT_LIMIT,
-        offset: args.offset,
-        completed_after: args.completed_after,
-        completed_before: args.completed_before,
-      }, options);
+      const items = await readList(runtime, list!, readOptions, options);
       return renderList(list!, items as MdItem[], opts);
     }),
   );
