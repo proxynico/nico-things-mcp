@@ -34,17 +34,6 @@ export type MdRenderOptions = {
   includeCompleted: boolean;
 };
 
-const DEFAULT_OPTS: MdRenderOptions = { includeNotes: true, includeCompleted: false };
-
-function isProject(item: MdItem): item is MdProject {
-  return (item as MdProject).kind === "project";
-}
-
-function isoDateOnly(value: string | null | undefined): string | null {
-  if (!value) return null;
-  return value.slice(0, 10);
-}
-
 // Quote YAML strings to stay safe against colons, hashes, brackets, etc.
 function yamlQuote(value: string): string {
   return '"' + value.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
@@ -54,14 +43,6 @@ function yamlQuote(value: string): string {
 // Trust inline markdown (*, _, #, backticks) — Things users write markdown on purpose.
 function escapeListMarker(line: string): string {
   return line.replace(/^(\s*)([-*+]|\d+\.)(\s)/, "$1\\$2$3");
-}
-
-function indentNote(notes: string | undefined, indent: string): string[] {
-  if (!notes) return [];
-  return notes.split("\n").map((line) => {
-    if (line.trim().length === 0) return "";
-    return indent + escapeListMarker(line);
-  });
 }
 
 function checkboxFor(status: string): string {
@@ -79,8 +60,7 @@ function tagSuffix(tags: string[] | undefined): string {
 }
 
 function dueSuffix(dueDate: string | null | undefined): string {
-  const d = isoDateOnly(dueDate);
-  return d ? ` (due ${d})` : "";
+  return dueDate ? ` (due ${dueDate})` : "";
 }
 
 function filterByCompleted<T extends { status: string }>(items: T[], opts: MdRenderOptions): T[] {
@@ -88,13 +68,13 @@ function filterByCompleted<T extends { status: string }>(items: T[], opts: MdRen
   return items.filter((item) => item.status === "open");
 }
 
-export function renderTodo(item: MdTodo, opts: MdRenderOptions = DEFAULT_OPTS): string {
+export function renderTodo(item: MdTodo, opts: MdRenderOptions): string {
   const lines: string[] = [];
   const head = `- ${checkboxFor(item.status)} ${item.name}${cancelSuffix(item.status)}${dueSuffix(item.dueDate)}${tagSuffix(item.tags)}`;
   lines.push(head);
 
   if (opts.includeNotes && item.notes && item.notes.trim().length > 0) {
-    lines.push(...indentNote(item.notes, "    "));
+    lines.push(...item.notes.split("\n").map((line) => (line.trim() ? "    " + escapeListMarker(line) : "")));
   }
 
   for (const checklist of item.checklistItems ?? []) {
@@ -108,8 +88,7 @@ export function renderTodo(item: MdTodo, opts: MdRenderOptions = DEFAULT_OPTS): 
 export function renderFrontmatter(item: MdProject): string {
   const lines: string[] = ["---", `project: ${yamlQuote(item.name)}`];
   if (item.area) lines.push(`area: ${yamlQuote(item.area)}`);
-  const due = isoDateOnly(item.dueDate);
-  if (due) lines.push(`due: ${due}`);
+  if (item.dueDate) lines.push(`due: ${item.dueDate}`);
   const tags = (item.tags ?? []).filter(Boolean);
   if (tags.length) {
     lines.push(`tags: [${tags.map(yamlQuote).join(", ")}]`);
@@ -118,7 +97,7 @@ export function renderFrontmatter(item: MdProject): string {
   return lines.join("\n");
 }
 
-export function renderProject(item: MdProject, opts: MdRenderOptions = DEFAULT_OPTS): string {
+export function renderProject(item: MdProject, opts: MdRenderOptions): string {
   const parts: string[] = [renderFrontmatter(item), `## ${item.name}`];
 
   if (opts.includeNotes && item.notes && item.notes.trim().length > 0) {
@@ -160,7 +139,7 @@ function listDisplayName(list: string): string {
 export function renderList(
   list: string,
   items: MdItem[],
-  opts: MdRenderOptions = DEFAULT_OPTS,
+  opts: MdRenderOptions,
 ): string {
   const header = `# ${listDisplayName(list)}`;
   const filtered = filterByCompleted(items, opts);
@@ -168,7 +147,7 @@ export function renderList(
     return `${header}\n\n*(empty)*\n`;
   }
   const rendered = filtered.map((item) => {
-    if (isProject(item)) {
+    if (item.kind === "project") {
       const count = typeof item.todoCount === "number" ? ` (${item.todoCount} todos)` : "";
       return `- ${checkboxFor(item.status)} **${item.name}**${cancelSuffix(item.status)}${count}${dueSuffix(item.dueDate)}${tagSuffix(item.tags)}`;
     }
@@ -178,8 +157,8 @@ export function renderList(
 }
 
 // Dispatch for the `id` selector — could be a project or a todo.
-export function renderItem(item: MdItem, opts: MdRenderOptions = DEFAULT_OPTS): string {
-  if (isProject(item)) {
+export function renderItem(item: MdItem, opts: MdRenderOptions): string {
+  if (item.kind === "project") {
     return renderProject(item, opts);
   }
   return renderTodo(item, opts) + "\n";

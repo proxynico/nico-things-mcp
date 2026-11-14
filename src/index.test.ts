@@ -49,7 +49,6 @@ function createMockApp({
 
   const runtime: ThingsRuntime = {
     token,
-    appPath: "/Applications/Things3.app",
     dbPath,
     async jxa(body, args, options) {
       jxaCalls.push({ body, args, signal: options?.signal });
@@ -168,7 +167,7 @@ describe("runtime", () => {
     expect(calls[0]?.[3]).not.toContain("CompletionHandler");
   });
 
-  test("quietJson sends the auth token only for updates", async () => {
+  test("quietJson sends the auth token with the operations", async () => {
     const calls: string[][] = [];
     const runtime = createRuntime({
       token: "token",
@@ -180,15 +179,8 @@ describe("runtime", () => {
     });
 
     await runtime.quietJson([{ type: "to-do", operation: "update", id: "1", attributes: { when: "someday" } }]);
-    await runtime.quietJson([{ type: "to-do", attributes: { title: "New" } }]);
     expect(calls[0]?.[3]).toContain("things:///json?auth-token=token&reveal=false&data=");
     expect(calls[0]?.[3]).toContain("%22operation%22%3A%22update%22");
-    expect(calls[1]?.[3]).not.toContain("auth-token");
-  });
-
-  test("quietJson refuses updates without a token", async () => {
-    const runtime = createRuntime({ token: "", dbPath: null, execFn: async () => ({ stdout: "" }) });
-    await expect(runtime.quietJson([{ operation: "update" }])).rejects.toThrow("THINGS_AUTH_TOKEN is required");
   });
 
   test("detects sandboxed Apple Events failures", () => {
@@ -395,7 +387,7 @@ describe("search", () => {
     await callTool(tools.search, { query: "ship", tag: "ops" });
     await callTool(tools.search, { tag: "ops", limit: 25, offset: 50 });
     expect(jxaCalls[0]?.args).toEqual({ query: "ship", tag: "ops", limit: 100, offset: 0 });
-    expect(jxaCalls[1]?.args).toEqual({ query: null, tag: "ops", limit: 25, offset: 50 });
+    expect(jxaCalls[1]?.args).toEqual({ tag: "ops", limit: 25, offset: 50 });
     expect(jxaCalls[0]?.body).toContain("tagsOf(t).some");
     expect(() => parseToolInput(tools.search, { query: "ship", limit: 501 })).toThrow();
   });
@@ -799,7 +791,7 @@ describe("markdown renderer", () => {
       name: "Write spec",
       status: "open",
       tags: ["docs", "q2"],
-      dueDate: "2026-05-01T12:00:00.000Z",
+      dueDate: "2026-05-01",
     };
     expect(renderTodo(todo, fullOpts)).toBe("- [ ] Write spec (due 2026-05-01) #docs #q2");
   });
@@ -886,7 +878,7 @@ describe("markdown renderer", () => {
       name: "Launch",
       status: "open",
       area: "Engineering",
-      dueDate: "2026-05-01T00:00:00.000Z",
+      dueDate: "2026-05-01",
       tags: ["q2"],
       notes: "Kickoff notes.",
       todos: [

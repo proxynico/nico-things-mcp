@@ -1,14 +1,10 @@
 // A small Things-shaped SQLite database for tests. Calendar dates are relative to today.
 
 import { Database } from "bun:sqlite";
-import { isoDayToThingsDate } from "./shared";
+import { isoDayToThingsDate, shiftIsoDay, todayIso } from "./shared";
 
 export function packDay(offsetDays: number): number {
-  const date = new Date();
-  date.setDate(date.getDate() + offsetDays);
-  return isoDayToThingsDate(
-    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`,
-  );
+  return isoDayToThingsDate(shiftIsoDay(todayIso(), offsetDays));
 }
 
 // stopDate and creationDate are REAL unix seconds.
@@ -41,7 +37,7 @@ type Task = {
 };
 
 // Things' start column: 0 Inbox, 1 Anytime, 2 Someday or scheduled.
-export const TASKS: Task[] = [
+const TASKS: Task[] = [
   { uuid: "proj-1", title: "Website", type: 1, area: "area-1", notes: "site notes", deadline: packDay(30), openUntrashedLeafActionsCount: 3 },
   { uuid: "proj-2", title: "Done Project", type: 1, status: 3, stopDate: STOP_DONE - 50, index: 1 },
   { uuid: "proj-3", title: "Later Project", type: 1, start: 2, area: "area-1", index: 2 },
@@ -100,19 +96,10 @@ export function createFixtureDb(path: string): void {
   db.run(`insert into TMTaskTag values ('t-pa', 'tag-2'), ('t-pa', 'tag-1'), ('t-search', 'tag-1')`);
   db.run(`insert into TMChecklistItem values ('ci-2', 't-pa', 'Step two', 0, 1), ('ci-1', 't-pa', 'Step one', 3, 0)`);
 
-  const insert = db.prepare(`insert into TMTask
-    (uuid, type, status, trashed, title, notes, start, startDate, startBucket, deadline, stopDate, creationDate,
-     userModificationDate, todayIndex, "index", openUntrashedLeafActionsCount, project, area, heading, rt1_recurrenceRule,
-     rt1_nextInstanceStartDate)
-    values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
   for (const task of TASKS) {
-    insert.run(
-      task.uuid, task.type ?? 0, task.status ?? 0, task.trashed ?? 0, task.title, task.notes ?? null,
-      task.start ?? 1, task.startDate ?? null, task.startBucket ?? 0, task.deadline ?? null, task.stopDate ?? null,
-      task.creationDate ?? null, task.userModificationDate ?? 0, task.todayIndex ?? 0, task.index ?? 0,
-      task.openUntrashedLeafActionsCount ?? null, task.project ?? null, task.area ?? null, task.heading ?? null,
-      task.rt1_recurrenceRule ?? null, task.rt1_nextInstanceStartDate ?? null,
-    );
+    const row = { type: 0, status: 0, trashed: 0, start: 1, startBucket: 0, userModificationDate: 0, todayIndex: 0, index: 0, ...task };
+    const columns = Object.keys(row).map((column) => `"${column}"`).join(", ");
+    db.run(`insert into TMTask (${columns}) values (${Object.keys(row).map(() => "?").join(", ")})`, Object.values(row));
   }
   db.close(false);
 }

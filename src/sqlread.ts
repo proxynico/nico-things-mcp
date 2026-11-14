@@ -264,14 +264,8 @@ export function readItem(dbPath: string, id: string, childChecklists = false): I
 
 // A project by name with its open todos and their checklists.
 export function readProject(dbPath: string, name: string): Item | null {
-  return withDb(dbPath, (db) => {
-    const id = findProject(db, name);
-    if (!id) return null;
-    const [project] = selectTasks(db, ["t.uuid = ?"], [id], "t.uuid");
-    if (!project) return null;
-    project.todos = projectTodos(db, id, {}, true);
-    return project;
-  });
+  const id = withDb(dbPath, (db) => findProject(db, name));
+  return id ? readItem(dbPath, id, true) : null;
 }
 
 export function readProjectTodos(dbPath: string, name: string, options: ReadOptions = {}): Item[] | null {
@@ -283,12 +277,12 @@ export function readProjectTodos(dbPath: string, name: string, options: ReadOpti
 
 export function readAreaProjects(dbPath: string, area: string): Item[] {
   return withDb(dbPath, (db) =>
-    selectTasks(db, ["t.type = 1", "t.trashed = 0", "t.status = 0", "a.title = ?"], [area], 't."index"'),
+    selectTasks(db, [...OPEN, "t.type = 1", "a.title = ?"], [area], 't."index"'),
   );
 }
 
 export function listProjects(dbPath: string): Item[] {
-  return withDb(dbPath, (db) => selectTasks(db, ["t.type = 1", "t.trashed = 0", "t.status = 0"], [], 't."index"'));
+  return withDb(dbPath, (db) => selectTasks(db, [...OPEN, "t.type = 1"], [], 't."index"'));
 }
 
 export function listAreas(dbPath: string): Array<{ id: string; name: string }> {
@@ -306,7 +300,7 @@ export function listTags(dbPath: string): Array<{ id: string; name: string }> {
 // Open todos whose title contains query (case-insensitive) and that carry tag.
 export function search(dbPath: string, options: { query?: string; tag?: string; limit?: number; offset?: number }): Item[] {
   return withDb(dbPath, (db) => {
-    const where = ["t.type = 0", "t.trashed = 0", "t.status = 0", "coalesce(h.trashed, 0) = 0", "coalesce(p.trashed, 0) = 0"];
+    const where = [...OPEN, "t.type = 0"];
     const params: string[] = [];
     if (options.query) {
       where.push("t.title like ? escape '\\'");

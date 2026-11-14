@@ -9,7 +9,6 @@ import {
   THINGS_DB_PATH,
   THINGS_FAST_READS,
   type ThingsRuntime,
-  requireToken,
 } from "./shared";
 
 const execFileAsync = promisify(execFile);
@@ -88,8 +87,8 @@ var scheduleWhen = function(obj, w) {
 };`;
 
 // Things only updates its database while it runs, so SQLite reads keep it open, hidden.
-export async function openThingsHidden(execFn: ExecFn = exec): Promise<void> {
-  await execFn("osascript", [
+export async function openThingsHidden(): Promise<void> {
+  await exec("osascript", [
     "-l",
     "JavaScript",
     "-e",
@@ -113,7 +112,6 @@ export function createRuntime({
 } = {}): ThingsRuntime {
   return {
     token,
-    appPath: THINGS_APP_PATH,
     dbPath,
 
     async jxa(body, args = {}, options = {}) {
@@ -148,10 +146,8 @@ delay(0.5);`,
     },
 
     async quietJson(operations, options = {}) {
-      const requiresAuth = operations.some((operation) => operation.operation === "update");
-      if (requiresAuth) requireToken(token);
       await this.quietUrl("json", {
-        "auth-token": requiresAuth ? token : undefined,
+        "auth-token": token,
         reveal: "false",
         data: JSON.stringify(operations),
       }, options);

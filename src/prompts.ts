@@ -1,7 +1,7 @@
 // Ready-made routines. Claude Code lists MCP prompts as slash commands, such as /mcp__things__plan_my_day.
 // Each prompt tells the assistant which reads to run, then to wait for approval before changing Things.
 
-import type { McpServer, RegisteredPrompt } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { GetPromptResult } from "@modelcontextprotocol/sdk/types.js";
 import { isoDayToUnixStart, shiftIsoDay, todayIso } from "./shared";
 
@@ -46,25 +46,23 @@ function clearInbox(): string {
 3. ${ASK_FIRST} I may edit the table. Then apply it with \`update\` or \`bulk_update\`, and \`delete\` only the items I approved.`;
 }
 
-export function registerPrompts(server: McpServer, { today = todayIso }: { today?: () => string } = {}): Record<string, RegisteredPrompt> {
-  return {
-    plan_my_day: server.registerPrompt(
-      "plan_my_day",
-      { title: "Plan my day", description: "Review Today and overdue to-dos in Things and suggest a realistic plan." },
-      () => userMessage(planMyDay(today())),
-    ),
-    weekly_review: server.registerPrompt(
-      "weekly_review",
-      {
-        title: "Weekly review",
-        description: "Summarize the last seven days in Things, flag loose ends and stalled projects, and look at the week ahead.",
-      },
-      () => userMessage(weeklyReview(today())),
-    ),
-    clear_inbox: server.registerPrompt(
-      "clear_inbox",
-      { title: "Clear my inbox", description: "Suggest a home, date, and tags for each Things Inbox item, then file them once approved." },
-      () => userMessage(clearInbox()),
-    ),
-  };
+export function registerPrompts(server: McpServer, { today = todayIso }: { today?: () => string } = {}): void {
+  server.registerPrompt(
+    "plan_my_day",
+    { title: "Plan my day", description: "Review Today and overdue to-dos in Things and suggest a realistic plan." },
+    () => userMessage(planMyDay(today())),
+  );
+  server.registerPrompt(
+    "weekly_review",
+    {
+      title: "Weekly review",
+      description: "Summarize the last seven days in Things, flag loose ends and stalled projects, and look at the week ahead.",
+    },
+    () => userMessage(weeklyReview(today())),
+  );
+  server.registerPrompt(
+    "clear_inbox",
+    { title: "Clear my inbox", description: "Suggest a home, date, and tags for each Things Inbox item, then file them once approved." },
+    () => userMessage(clearInbox()),
+  );
 }

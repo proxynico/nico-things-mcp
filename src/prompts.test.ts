@@ -8,7 +8,6 @@ import type { ThingsRuntime } from "./shared";
 
 const runtime: ThingsRuntime = {
   token: "",
-  appPath: "/Applications/Things3.app",
   dbPath: null,
   jxa: async () => "[]",
   quietUrl: async () => {},

@@ -8,7 +8,6 @@ export type ExecFn = (file: string, args: string[], options?: RuntimeCallOptions
 
 export type ThingsRuntime = {
   token: string;
-  appPath: string;
   // Things' SQLite database, or null when SQLite reads are off or no database was found.
   dbPath: string | null;
   jxa(body: string, args?: Record<string, unknown>, options?: RuntimeCallOptions): Promise<string>;
