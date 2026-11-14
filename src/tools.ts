@@ -101,12 +101,14 @@ const JXA_KINDS = `return JSON.stringify(P.ids.map(function(id) {
   }
 }));`;
 
-const JXA_ADD_TODO = `var project = null;
-if (P.list) { project = app.projects.byName(P.list); project.id(); }
-var props = {name: P.title};
+const JXA_NEW_PROPS = `var props = {name: P.title};
 if (P.notes) props.notes = P.notes;
 if (P.tags && P.tags.length && !P.tagsNeedJson) props.tagNames = P.tags.join(", ");
-if (P.deadline) props.dueDate = new Date(P.deadline + "T12:00:00");
+if (P.deadline) props.dueDate = new Date(P.deadline + "T12:00:00");`;
+
+const JXA_ADD_TODO = `var project = null;
+if (P.list) { project = app.projects.byName(P.list); project.id(); }
+${JXA_NEW_PROPS}
 var todo = app.make({new: "toDo", withProperties: props});
 if (P.list) {
   todo.project = project;
@@ -116,10 +118,7 @@ return JSON.stringify({id: todo.id(), name: todo.name(), status: todo.status()})
 
 const JXA_ADD_PROJECT = `var area = null;
 if (P.area) { area = app.areas.byName(P.area); area.id(); }
-var props = {name: P.title};
-if (P.notes) props.notes = P.notes;
-if (P.tags && P.tags.length && !P.tagsNeedJson) props.tagNames = P.tags.join(", ");
-if (P.deadline) props.dueDate = new Date(P.deadline + "T12:00:00");
+${JXA_NEW_PROPS}
 var proj = app.make({new: "project", withProperties: props});
 if (P.area) {
   proj.area = area;
@@ -498,6 +497,35 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime, request
     }),
   );
 
+  function createItem(
+    kind: "todo" | "project",
+    script: string,
+    destination: { collection: "projects" | "areas"; name?: string },
+    { request_id, ...params }: { request_id: string; when?: string; tags?: string[]; checklist_items?: string[] },
+    options: RuntimeCallOptions,
+  ): Promise<string> {
+    const tagsNeedJson = needsJsonTagWrite(params.tags);
+    const attributes = jsonUpdateAttributes(kind, {
+      when: usesJsonOnlyWhen(params.when) ? params.when : undefined,
+      tags: tagsNeedJson ? params.tags : undefined,
+      checklist_items: params.checklist_items?.length ? params.checklist_items : undefined,
+    });
+    if (attributes) requireToken(runtime.token);
+
+    return requests.run({ requestId: request_id, tool: `add_${kind}`, params, signal: options.signal,
+      preflight: destination.name ? async () => {
+        await runtime.jxa(`app.${destination.collection}.byName(P.name).id(); return "";`, { name: destination.name }, options);
+      } : undefined,
+      create: async (recordId) => {
+        const created = await runtime.jxa(script, { ...params, tagsNeedJson });
+        const { id } = z.object({ id: z.string() }).parse(JSON.parse(created));
+        recordId(id);
+        if (!attributes) return created;
+        return patchAndReread({ runtime, kind, id, attributes, expectedChecklist: params.checklist_items });
+      },
+    });
+  }
+
   tools.add_todo = server.registerTool(
     "add_todo",
     {
@@ -514,28 +542,7 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime, request
       },
       annotations: WRITE,
     },
-    tool(async ({ request_id, ...params }, options) => {
-      const tagsNeedJson = needsJsonTagWrite(params.tags);
-      const attributes = jsonUpdateAttributes("todo", {
-        when: usesJsonOnlyWhen(params.when) ? params.when : undefined,
-        tags: tagsNeedJson ? params.tags : undefined,
-        checklist_items: params.checklist_items?.length ? params.checklist_items : undefined,
-      });
-      if (attributes) requireToken(runtime.token);
-
-      return requests.run({ requestId: request_id, tool: "add_todo", params, signal: options.signal,
-        preflight: params.list ? async () => {
-          await runtime.jxa('var project = app.projects.byName(P.name); project.id(); return "";', { name: params.list }, options);
-        } : undefined,
-        create: async (recordId) => {
-          const created = await runtime.jxa(JXA_ADD_TODO, { ...params, tagsNeedJson });
-          const { id } = z.object({ id: z.string() }).parse(JSON.parse(created));
-          recordId(id);
-          if (!attributes) return created;
-          return patchAndReread({ runtime, kind: "todo", id, attributes, expectedChecklist: params.checklist_items });
-        },
-      });
-    }),
+    tool((args, options) => createItem("todo", JXA_ADD_TODO, { collection: "projects", name: args.list }, args, options)),
   );
 
   tools.add_project = server.registerTool(
@@ -554,27 +561,7 @@ export function registerTools(server: McpServer, runtime: ThingsRuntime, request
       },
       annotations: WRITE,
     },
-    tool(async ({ request_id, ...params }, options) => {
-      const tagsNeedJson = needsJsonTagWrite(params.tags);
-      const attributes = jsonUpdateAttributes("project", {
-        when: usesJsonOnlyWhen(params.when) ? params.when : undefined,
-        tags: tagsNeedJson ? params.tags : undefined,
-      });
-      if (attributes) requireToken(runtime.token);
-
-      return requests.run({ requestId: request_id, tool: "add_project", params, signal: options.signal,
-        preflight: params.area ? async () => {
-          await runtime.jxa('var area = app.areas.byName(P.name); area.id(); return "";', { name: params.area }, options);
-        } : undefined,
-        create: async (recordId) => {
-          const created = await runtime.jxa(JXA_ADD_PROJECT, { ...params, tagsNeedJson });
-          const { id } = z.object({ id: z.string() }).parse(JSON.parse(created));
-          recordId(id);
-          if (!attributes) return created;
-          return patchAndReread({ runtime, kind: "project", id, attributes });
-        },
-      });
-    }),
+    tool((args, options) => createItem("project", JXA_ADD_PROJECT, { collection: "areas", name: args.area }, args, options)),
   );
 
   tools.update = server.registerTool(
