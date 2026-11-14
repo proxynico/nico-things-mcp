@@ -39,18 +39,7 @@ describe("readList", () => {
   test("anytime holds todos only, today's included, heading todos after loose ones", () => {
     const items = ids(sql.readList(dbPath, "anytime"));
     expect(items.slice(0, 5)).toEqual(["t-inbox-due", "t-started", "t-pa", "t-pb", "t-ph"]);
-    expect(items).toContain("t-unconfirmed");
-    expect(items).toContain("t-inbox-due");
-    expect(items).toContain("t-future");
-    expect(items).toContain("t-search");
-    expect(items).not.toContain("proj-1");
-    expect(items).not.toContain("proj-4");
-    expect(items).not.toContain("t-inbox");
-    expect(items).not.toContain("t-upcoming");
-    expect(items).not.toContain("t-later");
-    expect(items).not.toContain("proj-3");
-    expect(items).not.toContain("t-dropped");
-    expect(items).not.toContain("t-template");
+    expect(items.slice(5).sort()).toEqual(["t-evening", "t-future", "t-overdue", "t-search", "t-today-a", "t-today-b", "t-unconfirmed"]);
   });
 
   test("upcoming holds future start dates, unscheduled future deadlines, then repeating templates", () => {

@@ -10,7 +10,7 @@ import { CreateRequests } from "./creates";
 import { createServer } from "./index";
 import { renderArea, renderList, renderProject, renderTodo, type MdProject, type MdTodo } from "./markdown";
 import { createRuntime } from "./runtime";
-import { errmsg, isoDayToUnixStart, isSandboxAutomationError, normalizeThingsValue, type ThingsRuntime } from "./shared";
+import { errmsg, isoDayToUnixStart, normalizeThingsValue, type ThingsRuntime } from "./shared";
 
 const dir = mkdtempSync(join(tmpdir(), "nico-things-mcp-tools-"));
 const dbPath = join(dir, "things.sqlite");
@@ -27,8 +27,6 @@ beforeAll(() => {
 afterAll(() => {
   rmSync(dir, { force: true, recursive: true });
 });
-
-const normalizeThingsJson = (text: string) => JSON.stringify(normalizeThingsValue(JSON.parse(text)));
 
 type JxaFn = (body: string, args?: Record<string, unknown>) => Promise<string> | string;
 
@@ -110,9 +108,7 @@ describe("runtime", () => {
       const error = Object.assign(new Error("Command failed: osascript private-test-argument"), {
         cmd: "osascript private-test-argument", stderr, signal: "SIGKILL",
       });
-      expect(errmsg(error)).not.toContain("private-test-argument");
-      expect(errmsg(error)).not.toContain("things://");
-      expect(errmsg(error)).not.toContain("osascript");
+      expect(errmsg(error)).toBe("Things automation process failed without an error message");
     }
   });
 
@@ -191,14 +187,6 @@ describe("runtime", () => {
     await expect(runtime.quietJson([{ operation: "update" }])).rejects.toThrow("THINGS_AUTH_TOKEN is required");
   });
 
-  test("detects sandboxed Apple Events failures", () => {
-    const sandboxError = Object.assign(new Error("fallback"), {
-      stderr:
-        "Connection Invalid error for service com.apple.hiservices-xpcservice.\nError received in message reply handler: Connection invalid\n",
-    });
-    expect(isSandboxAutomationError(sandboxError)).toBeTrue();
-    expect(isSandboxAutomationError(new Error("boom"))).toBeFalse();
-  });
 });
 
 describe("read", () => {
@@ -367,7 +355,10 @@ describe("doctor", () => {
   test("explains sandboxed automation failures", async () => {
     const report = await doctor({
       jxa: async () => {
-        throw Object.assign(new Error("fallback"), { stderr: "Connection Invalid error for service com.apple.hiservices-xpcservice." });
+        throw Object.assign(new Error("fallback"), {
+          stderr:
+            "Connection Invalid error for service com.apple.hiservices-xpcservice.\nError received in message reply handler: Connection invalid\n",
+        });
       },
     });
     expect(report.checks.jxa_read?.message).toBe(
@@ -713,44 +704,40 @@ describe("show", () => {
 
 describe("normalization", () => {
   test("normalizes terminal dates to match the current status across nested items", () => {
-    const normalized = JSON.parse(
-      normalizeThingsJson(
-        JSON.stringify([
+    const normalized = normalizeThingsValue([
+      {
+        id: "done",
+        status: "completed",
+        completionDate: "2026-04-16T11:23:18.000Z",
+        cancellationDate: "2026-04-16T11:23:18.000Z",
+      },
+      {
+        id: "canceled",
+        status: "canceled",
+        completionDate: "2026-04-16T11:23:18.000Z",
+        cancellationDate: null,
+      },
+      {
+        id: "open",
+        status: "open",
+        completionDate: "2026-04-16T11:23:18.000Z",
+        cancellationDate: "2026-04-16T11:23:18.000Z",
+      },
+      {
+        id: "project",
+        status: "completed",
+        completionDate: null,
+        cancellationDate: "2026-04-16T11:23:18.000Z",
+        todos: [
           {
-            id: "done",
-            status: "completed",
-            completionDate: "2026-04-16T11:23:18.000Z",
-            cancellationDate: "2026-04-16T11:23:18.000Z",
-          },
-          {
-            id: "canceled",
+            id: "nested",
             status: "canceled",
             completionDate: "2026-04-16T11:23:18.000Z",
             cancellationDate: null,
           },
-          {
-            id: "open",
-            status: "open",
-            completionDate: "2026-04-16T11:23:18.000Z",
-            cancellationDate: "2026-04-16T11:23:18.000Z",
-          },
-          {
-            id: "project",
-            status: "completed",
-            completionDate: null,
-            cancellationDate: "2026-04-16T11:23:18.000Z",
-            todos: [
-              {
-                id: "nested",
-                status: "canceled",
-                completionDate: "2026-04-16T11:23:18.000Z",
-                cancellationDate: null,
-              },
-            ],
-          },
-        ]),
-      ),
-    ) as Array<Record<string, unknown>>;
+        ],
+      },
+    ]) as Array<Record<string, unknown>>;
 
     expect(normalized).toEqual([
       {
